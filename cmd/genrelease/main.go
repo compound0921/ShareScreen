@@ -8,7 +8,6 @@
 //	                                 不需要装任何东西。体积大,但下载的只有压缩包。
 //	ShareScreen-0.1-slim.exe         侧载版。8 MB,需要自己按 README 的「准备」
 //	                                 把 ffmpeg 和 MediaMTX 放到 tools/ 下。
-//	SHA256SUMS                       上面两个文件的校验和。
 //
 // 内嵌版之所以要打成 zip:Go 的 go:embed 不做压缩,exe 里原样塞着 155 MB 的
 // 工具,压成 zip 只剩四成 —— 下载量差一倍多。侧载版本来就只有 8 MB,没必要再包一层。
@@ -16,15 +15,12 @@ package main
 
 import (
 	"archive/zip"
-	"crypto/sha256"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -98,20 +94,6 @@ func run(version string) error {
 	}
 	made = append(made, artifact{"侧载版,需自备 tools/", slimPath})
 
-	// ── 校验和 ──
-	sumsPath := filepath.Join(outDir, "SHA256SUMS")
-	var sums strings.Builder
-	for _, a := range made {
-		sum, err := fileSHA256(a.path)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(&sums, "%s  %s\n", sum, filepath.Base(a.path))
-	}
-	if err := os.WriteFile(sumsPath, []byte(sums.String()), 0o644); err != nil {
-		return err
-	}
-
 	// ── 汇总 ──
 	fmt.Println()
 	for _, a := range made {
@@ -122,7 +104,6 @@ func run(version string) error {
 		fmt.Printf("  %-30s %7.1f MB   %s\n",
 			filepath.Base(a.path), float64(fi.Size())/(1<<20), a.desc)
 	}
-	fmt.Printf("  %s\n", filepath.Base(sumsPath))
 	fmt.Printf("\n都放在 %s/ 下。\n", outDir)
 	return nil
 }
@@ -176,18 +157,4 @@ func zipOne(zipPath, entryName, srcPath string) error {
 		return err
 	}
 	return zw.Close()
-}
-
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }

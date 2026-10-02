@@ -217,7 +217,6 @@ go run ./cmd/genrelease -version 0.1
 |---|---|---|
 | `ShareScreen-0.1-standalone.zip` | **70 MB** | 内嵌版。解压出 162 MB 的单文件 exe,拷到哪都能跑 |
 | `ShareScreen-0.1-slim.exe` | **8 MB** | 侧载版。需要自己按[「准备」](#准备只有自己编译时才需要)放好 `tools/` |
-| `SHA256SUMS` | | 上面两个的校验和 |
 
 > 内嵌版**必须打成 zip 再发**:Go 的 `go:embed` 不做压缩,exe 里原样塞着 155 MB
 > 的工具,压成 zip 只剩四成 —— 下载量整整差一倍多。侧载版本来就只有 8 MB,
