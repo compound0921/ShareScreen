@@ -66,6 +66,15 @@ func WriteConfig(dir string, o Options) (string, error) {
 	// WebRTC 唯一支持的音频编码。走 RTMP 就得用 AAC,MediaMTX 不做
 	// AAC→Opus 转码,观众那边直接没声音(实测)。
 	fmt.Fprintf(&b, "rtsp: yes\n")
+	// 只留 TCP。默认值 [udp, multicast, tcp] 会额外绑死 UDP :8000、:8001 和一段
+	// 组播地址 —— 而本程序推流时明确要求走 TCP(ffmpeg 那一侧有 -rtsp_transport
+	// tcp),观众走的是 WebRTC,这几个 UDP 监听一个都用不上。
+	//
+	// 不只是省几个端口::8000 是写死的,只要机器上已经有一个 MediaMTX 在跑,
+	// 第二个就永远起不来。现象是"MediaMTX 启动失败: exit status 1",真正的错因
+	// (udp :8000 被占)埋在它自己的 stderr 里,很难往"端口冲突"上想 —— 实测就是
+	// 这么踩到的。关掉 UDP 之后这类冲突不复存在。
+	fmt.Fprintf(&b, "rtspTransports: [tcp]\n")
 	fmt.Fprintf(&b, "rtspAddress: 127.0.0.1:%d\n\n", o.RTSPPort)
 
 	// RTMP 只为兼容 OBS 保留 —— OBS 低版本只能用 RTMP 推过来(但那样没声音)。
