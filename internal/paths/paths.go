@@ -1,17 +1,24 @@
 // Package paths 定位随程序分发的第三方工具(ffmpeg / MediaMTX)。
 //
-// 当前是"侧载"实现 —— 从可执行文件旁边的 tools/ 目录查找。
-// 后续若要改成 go:embed 内嵌分发,只需替换本文件:把 Resolve* 的实现改成
-// "释放到 %LOCALAPPDATA%\ShareScreen\bin\ 并返回路径",调用方一行都不用动。
-// 对外只暴露 ResolveFFmpeg / ResolveMediaMTX / DataDir 三个函数。
+// 有两种来源,启动时自动选择:
+//
+//	内嵌   main 通过 SetEmbeddedTools 交进来一个文件系统 —— 工具被打进了
+//	       二进制,这里负责释放到 %LOCALAPPDATA%\ShareScreen\bin\ 并返回路径
+//	侧载   从可执行文件旁边的 tools/ 目录查找
+//
+// 内嵌优先。main 只在带 embed_tools 标签构建时才会注入,所以默认构建
+// 就是侧载。
+//
+// 为什么默认侧载:内嵌让二进制从 8 MB 涨到约 165 MB,而且每次编译都要
+// 把那 155 MB 重新打包一遍,编译时间从秒级变成十几秒。日常开发用侧载,
+// 要分发时才构建内嵌版。
 package paths
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
 // Tool 是一个已定位的第三方工具。
@@ -20,81 +27,38 @@ type Tool struct {
 	Dir string // 该工具的工作目录(子进程的 cwd)
 }
 
-// 侧载时的相对布局
-var (
-	ffmpegRel   = filepath.Join("tools", "ffmpeg", "bin", "ffmpeg.exe")
-	mediamtxRel = filepath.Join("tools", "mediamtx", "mediamtx.exe")
+// 内嵌资源在文件系统里的路径。注意这只是 FS 里的键名,
+// 不是磁盘路径 —— 真正的 go:embed 声明在仓库根的 embed_tools.go,
+// 因为 go:embed 的路径相对于声明它的包目录,不能往外跳。
+const (
+	embeddedFFmpeg   = "tools/ffmpeg/bin/ffmpeg.exe"
+	embeddedMediaMTX = "tools/mediamtx/mediamtx.exe"
 )
 
+// embeddedTools 由 main 在带 embed_tools 标签构建时注入,否则为 nil。
+var embeddedTools fs.FS
+
+// SetEmbeddedTools 把内嵌的工具文件系统交给本包。
+//
+// 由仓库根的 embed_tools.go 调用。不在那里直接实现 Resolve,
+// 是因为 go:embed 只能嵌入所在包目录及其子目录 —— 那个包必须在
+// 仓库根,而根的包是 main,不适合承载业务逻辑。
+func SetEmbeddedTools(fsys fs.FS) { embeddedTools = fsys }
+
 // ResolveFFmpeg 定位 ffmpeg。
-func ResolveFFmpeg() (*Tool, error) { return resolve(ffmpegRel, "ffmpeg") }
+func ResolveFFmpeg() (*Tool, error) {
+	if embeddedTools != nil {
+		return extract(embeddedFFmpeg, "ffmpeg.exe")
+	}
+	return resolveSidecar(sidecarFFmpeg, "ffmpeg")
+}
 
 // ResolveMediaMTX 定位 MediaMTX。
-func ResolveMediaMTX() (*Tool, error) { return resolve(mediamtxRel, "mediamtx") }
-
-// resolve 按顺序在若干根目录下查找 rel,最后回退到 PATH。
-func resolve(rel, name string) (*Tool, error) {
-	var tried []string
-	for _, root := range searchRoots() {
-		p := filepath.Join(root, rel)
-		if looksExecutable(p) {
-			return &Tool{Exe: p, Dir: filepath.Dir(p)}, nil
-		}
-		tried = append(tried, p)
+func ResolveMediaMTX() (*Tool, error) {
+	if embeddedTools != nil {
+		return extract(embeddedMediaMTX, "mediamtx.exe")
 	}
-
-	// 兜底:系统 PATH
-	if p, err := exec.LookPath(name); err == nil {
-		if abs, err2 := filepath.Abs(p); err2 == nil {
-			p = abs
-		}
-		return &Tool{Exe: p, Dir: filepath.Dir(p)}, nil
-	}
-
-	return nil, fmt.Errorf(
-		"找不到 %s。已尝试以下位置:\n  %s\n"+
-			"请确认 tools/ 目录与程序放在一起,或把 %s 加入 PATH",
-		name, strings.Join(tried, "\n  "), name)
-}
-
-// searchRoots 返回按优先级排列的查找根目录。
-//
-// 先看可执行文件所在目录 —— 这是分发后的正常情况;
-// 再看当前工作目录 —— 这是 go run . / 在源码目录直接运行时的需要
-// (此时可执行文件在临时目录里,旁边没有 tools/)。
-func searchRoots() []string {
-	var roots []string
-	seen := map[string]bool{}
-
-	add := func(p string) {
-		if p == "" {
-			return
-		}
-		if abs, err := filepath.Abs(p); err == nil {
-			p = abs
-		}
-		if !seen[p] {
-			seen[p] = true
-			roots = append(roots, p)
-		}
-	}
-
-	if exe, err := os.Executable(); err == nil {
-		// 解析符号链接,否则某些场景下拿到的是链接本身的位置
-		if real, err := filepath.EvalSymlinks(exe); err == nil {
-			exe = real
-		}
-		add(filepath.Dir(exe))
-	}
-	if wd, err := os.Getwd(); err == nil {
-		add(wd)
-	}
-	return roots
-}
-
-func looksExecutable(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && !fi.IsDir() && fi.Mode().IsRegular()
+	return resolveSidecar(sidecarMediaMTX, "mediamtx")
 }
 
 // DataDir 返回配置等可写数据的存放目录(%LOCALAPPDATA%\ShareScreen),
@@ -114,4 +78,17 @@ func DataDir() (string, error) {
 		return "", fmt.Errorf("创建数据目录失败 %s: %w", dir, err)
 	}
 	return dir, nil
+}
+
+// binDir 是内嵌模式下释放出来的工具的存放目录。
+func binDir() (string, error) {
+	d, err := DataDir()
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(d, "bin")
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		return "", fmt.Errorf("创建目录失败 %s: %w", p, err)
+	}
+	return p, nil
 }

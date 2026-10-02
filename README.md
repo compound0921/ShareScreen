@@ -91,16 +91,32 @@ Windows 屏幕共享。本机采集画面,别人用浏览器打开链接就能�
 
 ---
 
-从源码构建:
+## 从源码构建
+
+需要 Go 1.27+。国内建议先 `go env -w GOPROXY=https://goproxy.cn,direct`。
+
+**日常用 —— 侧载,编译快:**
 
 ```bash
 go build -ldflags "-H=windowsgui -s -w" -o sharescreen.exe .
 ```
 
-需要 Go 1.27+。国内建议先 `go env -w GOPROXY=https://goproxy.cn,direct`。
+产物 **8 MB**,运行时从旁边的 `tools/` 目录找 ffmpeg 和 MediaMTX。
 
-> `-H=windowsgui` 是去掉控制台窗口的关键 —— 不加的话每次启动都会弹一个黑框。
-> `-s -w` 只是去符号表,体积从 12 MB 降到 8 MB,不影响功能。
+**要拷给别人 —— 内嵌,单文件:**
+
+```bash
+go build -tags embed_tools -ldflags "-H=windowsgui -s -w" -o sharescreen.exe .
+```
+
+产物 **163 MB**,不再依赖 `tools/`。首次运行时把两个工具释放到
+`%LOCALAPPDATA%\ShareScreen\bin\`,之后每次启动直接复用,不会重复写盘。
+
+> 内嵌构建要求 `tools/` 里的文件**先存在** —— 它们就是要被嵌进去的对象。
+> 两种模式都是一秒左右编译完成。
+
+> `-H=windowsgui` 是去掉控制台窗口的关键,不加的话每次启动都会弹黑框。
+> `-s -w` 只去符号表,不影响功能。
 
 ---
 
