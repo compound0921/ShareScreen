@@ -42,21 +42,42 @@ func main() {
 	// 分辨率预设的宽高比就会算错。
 	screen.SetDPIAware()
 
+	// 日志在 main 里建立,而不是在 run() 里 defer 关闭 —— 原因见 reportFatal。
+	if dataDir, err := paths.DataDir(); err == nil {
+		if closeLog, lerr := setupLogging(dataDir); lerr == nil {
+			defer closeLog()
+		} else {
+			log.Printf("警告: 无法写入日志文件: %v", lerr)
+		}
+	}
+
 	if err := run(*cfgPath, *printArgs, *noBrowser, *noTray); err != nil {
-		log.Fatalf("错误: %v", err)
+		reportFatal(err)
 	}
 }
 
+// reportFatal 报告启动失败,然后退出。
+//
+// 这里刻意不用 log.Fatalf。日志的输出是 MultiWriter(文件, stderr),而
+// MultiWriter 遇到第一个写入错误就返回 —— 只要日志文件已经关了,写 stderr
+// 那一步就永远轮不到,错误一个字都出不来。这个组合曾经让"端口被占用"这类
+// 启动失败变成完全静默:双击启动的用户只看到窗口闪一下,日志也毫无线索。
+//
+// 所以这里三件事都做:直接写 stderr(绕开 MultiWriter)、照常记日志、
+// 弹一个对话框 —— 双击启动时进程没有控制台,不弹框就等于没提示。
+func reportFatal(err error) {
+	msg := err.Error()
+	fmt.Fprintln(os.Stderr, "错误:", msg)
+	log.Println("错误:", msg)
+	showFatalDialog("ShareScreen 启动失败", msg)
+	os.Exit(1)
+}
+
 func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
-	// ── 数据目录与日志 ──
+	// 日志已经在 main 里建好了 —— 放那儿是为了让启动失败的错误报得出来。
 	dataDir, err := paths.DataDir()
 	if err != nil {
 		return err
-	}
-	if closeLog, lerr := setupLogging(dataDir); lerr != nil {
-		log.Printf("警告: 无法写入日志文件: %v", lerr)
-	} else {
-		defer closeLog()
 	}
 
 	// ── 配置 ──
