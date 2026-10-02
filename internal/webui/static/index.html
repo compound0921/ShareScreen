@@ -31,9 +31,19 @@
     </div>
 
     <div class="field" id="windowField" hidden>
-      <label for="windowTitle">窗口标题</label>
+      <label for="windowSelect">选择窗口</label>
+      <div class="inline-row">
+        <select id="windowSelect"></select>
+        <button id="refreshWindows" type="button">刷新</button>
+      </div>
+
+      <label for="windowTitle" class="gap-top">或手动填写标题</label>
       <input type="text" id="windowTitle" placeholder="窗口标题中包含的文字">
-      <p class="hint">匹配标题中包含该文字的窗口。注意:窗口被其他窗口遮挡时,画面会被遮挡物覆盖。</p>
+      <p class="hint">
+        按<strong>标题中包含的文字</strong>匹配,不要求完全一致。
+        窗口标题会变(浏览器切标签、编辑器换文件),变了就重新选一次。
+        窗口被其他窗口遮挡时,画面会被遮挡物覆盖。
+      </p>
     </div>
 
     <div class="field">

@@ -147,6 +147,16 @@ select {
   background-repeat: no-repeat;
 }
 
+.inline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.inline-row select { flex: 1; min-width: 0; }
+.inline-row button { flex-shrink: 0; }
+
+.gap-top { margin-top: 12px; }
+
 .input-suffix {
   display: flex;
   align-items: center;

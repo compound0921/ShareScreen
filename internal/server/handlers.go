@@ -8,6 +8,7 @@ import (
 	"sharescreen/internal/config"
 	"sharescreen/internal/ffmpeg"
 	"sharescreen/internal/stream"
+	"sharescreen/internal/window"
 )
 
 type watchURL struct {
@@ -170,6 +171,28 @@ func (s *Server) handlePresets(w http.ResponseWriter, r *http.Request) {
 		presets = []config.Resolution{}
 	}
 	writeJSON(w, http.StatusOK, presets)
+}
+
+// handleWindows 返回当前可见的顶层窗口列表,供界面上的窗口选择器使用。
+//
+// 按需调用而不是缓存 —— 窗口标题随时在变(浏览器标签、编辑器里的文件名),
+// 缓存反而会让用户选到已经失效的标题。枚举本身是毫秒级的。
+func (s *Server) handleWindows(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	list, err := window.List()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "枚举窗口失败: " + err.Error(),
+		})
+		return
+	}
+	if list == nil {
+		list = []window.Window{}
+	}
+	writeJSON(w, http.StatusOK, list)
 }
 
 func (s *Server) handleEncoders(w http.ResponseWriter, r *http.Request) {

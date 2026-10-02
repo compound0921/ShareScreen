@@ -8,6 +8,8 @@ const els = {
   source: $('source'),
   sourceHint: $('sourceHint'),
   windowField: $('windowField'),
+  windowSelect: $('windowSelect'),
+  refreshWindows: $('refreshWindows'),
   windowTitle: $('windowTitle'),
   resolution: $('resolution'),
   fps: $('fps'),
@@ -118,6 +120,51 @@ function renderSourceFields() {
   const src = els.source.value;
   els.sourceHint.textContent = SOURCE_HINT[src] || '';
   els.windowField.hidden = src !== 'window';
+  if (src === 'window') {
+    loadWindows();
+  }
+}
+
+// loadWindows 拉取当前可见窗口,填充选择器。
+//
+// 不缓存 —— 窗口标题随时在变,缓存只会让用户选到已经失效的标题。
+async function loadWindows() {
+  els.windowSelect.innerHTML = '<option value="">正在读取…</option>';
+
+  let list;
+  try {
+    list = await api('/api/windows');
+  } catch (err) {
+    els.windowSelect.innerHTML = '<option value="">读取失败,请手动填写标题</option>';
+    return;
+  }
+
+  els.windowSelect.innerHTML = '';
+
+  const head = document.createElement('option');
+  head.value = '';
+  head.textContent = list.length ? '— 从列表选择 —' : '(没有找到可见窗口)';
+  els.windowSelect.appendChild(head);
+
+  for (const w of list) {
+    const opt = document.createElement('option');
+    // gdigrab 按子串匹配,完整标题必然匹配到它自己
+    opt.value = w.title;
+    opt.textContent = (w.process ? w.process + ' — ' : '') + w.title +
+      (w.minimized ? '   [已最小化]' : '');
+    els.windowSelect.appendChild(opt);
+  }
+
+  // 已配置的标题若还能在列表里找到对应窗口,回选它;
+  // 找不到就保持空选,提醒用户这个标题已经失效了。
+  const cur = els.windowTitle.value.trim();
+  if (cur) {
+    const match = list.find((w) => w.title === cur) ||
+                  list.find((w) => w.title.includes(cur));
+    if (match) {
+      els.windowSelect.value = match.title;
+    }
+  }
 }
 
 function renderWatchURLs(urls) {
@@ -335,14 +382,27 @@ async function init() {
   renderWatchURLs(state.watchUrls);
   renderStatus();
 
-  // 表单变更
-  for (const el of [els.source, els.resolution, els.fps, els.bitrate,
-                    els.encoder, els.windowTitle, els.uplink, els.publicHost]) {
-    el.addEventListener('change', () => {
-      renderSourceFields();
-      scheduleSave();
-    });
+  // 只有采集源变化才重渲染条件字段 —— 它会顺带刷新窗口列表,
+  // 挂到所有控件上会导致改个码率就去枚举一遍窗口。
+  els.source.addEventListener('change', () => {
+    renderSourceFields();
+    scheduleSave();
+  });
+
+  for (const el of [els.resolution, els.fps, els.bitrate,
+                    els.encoder, els.uplink, els.publicHost]) {
+    el.addEventListener('change', scheduleSave);
   }
+
+  // 从列表里选中窗口 → 写进标题输入框(标题框仍是唯一的数据来源)
+  els.windowSelect.addEventListener('change', () => {
+    if (els.windowSelect.value) {
+      els.windowTitle.value = els.windowSelect.value;
+      scheduleSave();
+    }
+  });
+  els.refreshWindows.addEventListener('click', loadWindows);
+
   els.windowTitle.addEventListener('input', scheduleSave);
   els.uplink.addEventListener('input', scheduleSave);
   els.publicHost.addEventListener('input', scheduleSave);
