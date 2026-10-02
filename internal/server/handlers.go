@@ -173,7 +173,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			needsRestart = true
 		}
 
-		if videoChanged(old.Video, updated.Video) && s.stream.Status().Running {
+		streamChanged := videoChanged(old.Video, updated.Video) ||
+			audioChanged(old.Audio, updated.Audio)
+		if streamChanged && s.stream.Status().Running {
 			needsRestart = true
 		}
 		if needsRestart {
@@ -308,6 +310,14 @@ func (s *Server) watchURLs(cfg config.Config) []watchURL {
 		})
 	}
 	return out
+}
+
+// audioChanged 报告音频参数是否有实质差异。
+//
+// 开关变化要重启 —— 开了才走 WASAPI 采集那条路。码率变化同样要重启,
+// 因为它是 ffmpeg 的输出参数。
+func audioChanged(a, b config.AudioConfig) bool {
+	return a.Enabled != b.Enabled || a.BitrateKbps != b.BitrateKbps
 }
 
 // videoChanged 报告两套推流参数是否有实质差异 —— 有差异就需要重启 ffmpeg。

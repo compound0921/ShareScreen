@@ -96,8 +96,22 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		if err != nil {
 			return err
 		}
-		target := fmt.Sprintf("rtmp://127.0.0.1:%d/%s", cfg.RTMPPort, cfg.StreamPath)
-		args, err := ffmpeg.BuildArgs(cfg.Video, enc, target, desktopW, desktopH)
+		target := fmt.Sprintf("rtsp://127.0.0.1:%d/%s", cfg.RTSPPort, cfg.StreamPath)
+
+		// 干跑:不去真打开音频设备,用占位参数把音频那一段也打印出来,
+		// 否则打印出来的命令行和实际跑的不是一回事。
+		var audioIn *ffmpeg.AudioInput
+		if cfg.Audio.Enabled {
+			audioIn = &ffmpeg.AudioInput{
+				URL:         "tcp://127.0.0.1:<系统分配的端口>",
+				SampleFmt:   "f32le",
+				SampleRate:  48000,
+				Channels:    2,
+				BitrateKbps: cfg.Audio.BitrateKbps,
+			}
+		}
+
+		args, err := ffmpeg.BuildArgs(cfg.Video, audioIn, enc, target, desktopW, desktopH)
 		if err != nil {
 			return err
 		}

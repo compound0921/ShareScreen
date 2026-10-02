@@ -19,11 +19,12 @@ const (
 
 	// OBS 直接推流到 MediaMTX,本程序不启动 ffmpeg。
 	//
-	// 这是唯一能带音频的方式:桌面音频在 Windows 上没法被 ffmpeg 直接
-	// 采集(没有 WASAPI 输入设备,声卡也不提供"立体声混音"),只能由
-	// OBS 用 WASAPI 采下来,连同画面一起推过来。
+	// 在程序自己支持桌面音频采集之前,这是唯一能带声音的方式。现在
+	// 音频已经内置(见 AudioConfig),这个源保留给需要 OBS 做更复杂
+	// 画面合成的场景 —— 比如多个来源叠加、加滤镜、加转场。
 	//
-	// 必须走 WHIP 而不是 RTMP —— 见 §"为什么只能 WHIP"。
+	// 必须走 WHIP 而不是 RTMP:RTMP 只能带 AAC,浏览器的 WebRTC 不认,
+	// 而 MediaMTX 不做 AAC→Opus 转码(实测)。
 	SourceOBSPush SourceType = "obs_push"
 )
 
@@ -57,9 +58,25 @@ type VideoConfig struct {
 	KeyframeSec int        `json:"keyframeSec"` // 关键帧间隔(秒);0 视为 1
 }
 
+// AudioConfig 是桌面音频采集参数。
+//
+// 音频由本程序自己用 WASAPI 回环采集(见 internal/audio),因为在 Windows 上
+// ffmpeg 拿不到桌面音频。采集到的是设备原始 PCM,由 ffmpeg 编码成 Opus ——
+// 只有 Opus 能被浏览器 WebRTC 直接播放。
+type AudioConfig struct {
+	// Enabled 打开后用默认播放设备的声音。采的是"你听到什么",
+	// 换耳机、切 HDMI、插蓝牙都会自动跟随,不需要改系统设置。
+	Enabled bool `json:"enabled"`
+
+	// BitrateKbps 是 Opus 的输出码率。音频码率本身很低,
+	// 96k 立体声已经接近透明,再往上加听不出区别。
+	BitrateKbps int `json:"bitrateKbps"`
+}
+
 // Config 是完整的运行配置。
 type Config struct {
 	Video VideoConfig `json:"video"`
+	Audio AudioConfig `json:"audio"`
 
 	// 实测上行带宽(Mbps)。用于计算"可支撑观众数",不参与推流本身。
 	UplinkMbps float64 `json:"uplinkMbps"`
@@ -93,6 +110,12 @@ func Default() Config {
 			BitrateKbps: 3000,
 			Encoder:     "",
 			KeyframeSec: 1,
+		},
+		// 默认打开音频。采不到时程序会退化成无声画面并给出警告,
+		// 不会因此起不来 —— 所以默认开着是安全的。
+		Audio: AudioConfig{
+			Enabled:     true,
+			BitrateKbps: 96,
 		},
 		// 上行带宽只是个起点,用户应当在界面里填实测值。
 		// 它只影响"可支撑观众数"的估算,不参与推流。
@@ -131,6 +154,10 @@ func (c *Config) Normalize() {
 	c.Video.Width -= c.Video.Width % 2
 	c.Video.Height -= c.Video.Height % 2
 
+	if c.Audio.BitrateKbps <= 0 || c.Audio.BitrateKbps > 512 {
+		c.Audio.BitrateKbps = d.Audio.BitrateKbps
+	}
+
 	if c.UplinkMbps <= 0 {
 		c.UplinkMbps = d.UplinkMbps
 	}
@@ -168,10 +195,17 @@ func (c *Config) Normalize() {
 //
 // 每个观众占用一路独立码率(WebRTC 没有多播),所以这是道除法。
 // 系数 0.7 是给协议开销和其他网络活动留的余量。
+//
+// 音频码率也要算进去 —— 它虽然小(96k 对比视频的 3000k),但乘以观众数
+// 之后不是可以忽略的量,漏掉会让估算偏乐观。
 func (c *Config) Capacity() int {
-	if c.Video.BitrateKbps <= 0 {
+	total := c.Video.BitrateKbps
+	if c.Audio.Enabled {
+		total += c.Audio.BitrateKbps
+	}
+	if total <= 0 {
 		return 0
 	}
 	usableKbps := c.UplinkMbps * 1000 * 0.7
-	return int(usableKbps / float64(c.Video.BitrateKbps))
+	return int(usableKbps / float64(total))
 }

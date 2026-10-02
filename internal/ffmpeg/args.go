@@ -23,14 +23,29 @@ var knownEncoders = []Encoder{
 	{Name: "libx264", Label: "x264(软件,CPU 占用高)", Kind: "x264", Hardware: false},
 }
 
+// AudioInput 描述一路由本程序喂给 ffmpeg 的原始 PCM 音频。
+//
+// 数据不是 ffmpeg 从设备采来的,而是 internal/audio 用 WASAPI 回环采集后
+// 通过一条本地 TCP 连接送进来的 —— 这台 ffmpeg 构建没有任何能拿到桌面音频
+// 的输入设备。SampleFmt 这些必须照抄音频包报告的设备混音格式:共享模式下
+// 格式由音频引擎决定,采集侧不做转换。
+type AudioInput struct {
+	URL         string // ffmpeg 要连接的地址,如 tcp://127.0.0.1:34567
+	SampleFmt   string // f32le / s16le / s32le
+	SampleRate  int
+	Channels    int
+	BitrateKbps int
+}
+
 // BuildArgs 组装完整的 ffmpeg 参数(不含可执行文件本身)。
 //
-// target 是推流地址,例如 rtmp://127.0.0.1:1935/live。
+// target 是推流地址,例如 rtsp://127.0.0.1:8554/live。
+// audio 为 nil 时不带音频。
 // srcW/srcH 是采集源的原始尺寸(桌面分辨率),用来判断"目标尺寸等于源尺寸"
 // 这种不需要缩放的伪缩放情况;传 0 表示未知。
 //
 // 参数顺序遵循 ffmpeg 的约定:输入选项在 -i 之前,输出选项在输入之后。
-func BuildArgs(v config.VideoConfig, enc Encoder, target string, srcW, srcH int) ([]string, error) {
+func BuildArgs(v config.VideoConfig, audio *AudioInput, enc Encoder, target string, srcW, srcH int) ([]string, error) {
 	input, err := inputArgs(v)
 	if err != nil {
 		return nil, err
@@ -39,11 +54,23 @@ func BuildArgs(v config.VideoConfig, enc Encoder, target string, srcW, srcH int)
 	args := []string{"-hide_banner"}
 	args = append(args, input...)
 
+	// 音视频是两个独立输入。输入选项必须紧贴各自的 -i 之前,
+	// 而且所有输入都得排在所有输出选项前面。
+	if audio != nil {
+		args = append(args,
+			"-f", audio.SampleFmt,
+			"-ar", strconv.Itoa(audio.SampleRate),
+			"-ac", strconv.Itoa(audio.Channels),
+			"-i", audio.URL)
+	}
+
 	// 恒定帧率。实测不加这个,输出帧率会稳定漂到 57–58。
+	// 音频流不受影响 —— 实测带音频时这一项不会报错也不会告警。
 	args = append(args, "-fps_mode", "cfr")
 
 	args = append(args, filterArgs(v, srcW, srcH)...)
 	args = append(args, encoderArgs(enc, v)...)
+	args = append(args, audioArgs(audio)...)
 
 	// 关键帧间隔。WebRTC 依赖关键帧做快速起播和流切换,1 秒一个。
 	args = append(args, "-g", strconv.Itoa(v.FPS*keyframeSec(v)))
@@ -88,6 +115,32 @@ func encoderArgs(enc Encoder, v config.VideoConfig) []string {
 		head = []string{"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency"}
 	}
 	return append(head, rate...)
+}
+
+// audioArgs 返回音频编码参数。
+//
+// 编码只能用 Opus,不能换 AAC —— 浏览器的 WebRTC 只支持 Opus 和 G.711,
+// 而 MediaMTX 不做转码,推 AAC 过去观众那边直接没声音(实测)。
+// 这也正是整套推流走 RTSP 而不是 RTMP 的原因。
+func audioArgs(a *AudioInput) []string {
+	if a == nil {
+		return nil
+	}
+	br := a.BitrateKbps
+	if br <= 0 {
+		br = 96
+	}
+	return []string{
+		"-c:a", "libopus",
+		"-b:a", strconv.Itoa(br) + "k",
+		// 统一到 48kHz 立体声。Opus 内部只认 48kHz,而且固定下来
+		// 观众侧拿到的参数就是确定的(设备混音格式因机器而异)。
+		"-ar", "48000",
+		"-ac", "2",
+		// lowdelay 模式关掉大缓冲,换更低的延迟 —— 屏幕共享要的是同步,
+		// 不是音乐级音质。
+		"-application", "lowdelay",
+	}
 }
 
 // Describe 返回一段可读的命令行,供界面展示和排查问题。

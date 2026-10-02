@@ -379,9 +379,53 @@ func (c *Capture) Run(ctx context.Context, w io.Writer) error {
 	}
 	defer comCall(c.client, 11) // Stop —— 退出时一定要停,否则设备一直占着
 
-	// 回环采集是"拉"模型:没有声音时引擎根本不产生数据包,所以取不到数据
-	// 时要主动睡一会儿,不能空转。
-	const idleSleep = 5 * time.Millisecond
+	const (
+		// 静音补齐的粒度。20ms 正好是一个 Opus 帧,再小只是徒增系统调用。
+		silenceStep = 20 * time.Millisecond
+		// 单次补齐的上限。进程被挂起或长时间没被调度时,
+		// 不要把这段时间一次性灌成静音。
+		silenceMax = 200 * time.Millisecond
+		// 没有真实数据时的轮询间隔。
+		idleSleep = 5 * time.Millisecond
+	)
+
+	bytesPerSec := float64(c.format.SampleRate * c.format.BlockAlign)
+	stepBytes := int64(float64(silenceStep) / float64(time.Second) * bytesPerSec)
+	maxBytes := int64(float64(silenceMax) / float64(time.Second) * bytesPerSec)
+	silence := make([]byte, maxBytes)
+
+	start := time.Now()
+	var produced int64
+
+	// padSilence 把输出补齐到当前时刻。
+	//
+	// 这是回环采集绕不开的一环:桌面没有声音时,音频引擎根本不产生数据包,
+	// GetNextPacketSize 会一直返回 0。而 ffmpeg 是按连续流处理的 —— 一个
+	// 字节都收不到它就一直在那儿等,连输出都打不开(实测:静音时 ffmpeg
+	// 卡在编码开始之前,画面也跟着出不来)。所以静音得自己补,模拟一个
+	// 真实采集设备的连续输出。
+	//
+	// 补的是"已经过去、但还没输出"的那段时间。真实数据一到位,产出量立刻
+	// 追上墙上时钟,缺口自然归零 —— 所以有声音时不会重复补。
+	padSilence := func() error {
+		want := int64(time.Since(start).Seconds() * bytesPerSec)
+		gap := want - produced
+		if gap < stepBytes {
+			return nil
+		}
+		if gap > maxBytes {
+			// 差得太远,说明进程被挂起过。重新对齐,别把这段时间补上,
+			// 否则会在瞬间给出一大段静音,把音画同步彻底冲垮。
+			start = time.Now()
+			produced = 0
+			return nil
+		}
+		if _, err := w.Write(silence[:gap]); err != nil {
+			return err
+		}
+		produced += gap
+		return nil
+	}
 
 	buf := make([]byte, 0, 1<<16)
 	for {
@@ -395,12 +439,20 @@ func (c *Capture) Run(ctx context.Context, w io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if n > 0 {
+			if _, err := w.Write(buf[:n]); err != nil {
+				return err
+			}
+			produced += int64(n)
+		}
+
+		if err := padSilence(); err != nil {
+			return err
+		}
+
+		// 没有真实数据时别空转。
 		if n == 0 {
 			time.Sleep(idleSleep)
-			continue
-		}
-		if _, err := w.Write(buf[:n]); err != nil {
-			return err
 		}
 	}
 }
