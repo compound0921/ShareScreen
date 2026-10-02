@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ShareScreen</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>ShareScreen</h1>
+  <span id="badge" class="badge badge-idle">已停止</span>
+</header>
+
+<main class="grid">
+
+  <!-- ─────────── 左栏:设置 ─────────── -->
+  <section class="card">
+    <h2>采集设置</h2>
+
+    <div class="field">
+      <label for="source">采集源</label>
+      <select id="source">
+        <option value="screen_ddagrab">屏幕(推荐,GPU 采集)</option>
+        <option value="screen_gdigrab">屏幕(兼容模式)</option>
+        <option value="window">单个窗口</option>
+        <option value="obs">OBS 虚拟摄像头</option>
+      </select>
+      <p class="hint" id="sourceHint"></p>
+    </div>
+
+    <div class="field" id="windowField" hidden>
+      <label for="windowTitle">窗口标题</label>
+      <input type="text" id="windowTitle" placeholder="窗口标题中包含的文字">
+      <p class="hint">匹配标题中包含该文字的窗口。注意:窗口被其他窗口遮挡时,画面会被遮挡物覆盖。</p>
+    </div>
+
+    <div class="field">
+      <label for="resolution">分辨率</label>
+      <select id="resolution"></select>
+      <p class="hint">不缩放可走零拷贝路径,CPU 占用最低、画面最清晰。</p>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="fps">帧率</label>
+        <select id="fps">
+          <option value="60">60 fps</option>
+          <option value="30">30 fps</option>
+          <option value="20">20 fps</option>
+          <option value="15">15 fps</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="bitrate">码率</label>
+        <select id="bitrate">
+          <option value="1000">1 Mbps</option>
+          <option value="1500">1.5 Mbps</option>
+          <option value="2000">2 Mbps</option>
+          <option value="3000">3 Mbps</option>
+          <option value="4000">4 Mbps</option>
+          <option value="6000">6 Mbps</option>
+          <option value="8000">8 Mbps</option>
+          <option value="12000">12 Mbps</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="encoder">编码器</label>
+        <select id="encoder"></select>
+      </div>
+
+      <div class="field">
+        <label for="uplink">上行带宽</label>
+        <div class="input-suffix">
+          <input type="number" id="uplink" min="1" max="1000" step="0.1">
+          <span>Mbps</span>
+        </div>
+      </div>
+    </div>
+    <p class="hint">填实测的上传速率,不是套餐标称值。它只用于估算能支撑几个观众。</p>
+
+    <div class="field">
+      <label for="publicHost">公网地址(可选)</label>
+      <input type="text" id="publicHost" placeholder="例如 112.226.166.178:8443">
+      <p class="hint">
+        填了就显示公网观看链接,并把它声明给 MediaMTX。
+        <strong>必须填</strong>,否则公网观众拿到的全是内网地址,画面出不来。
+        格式为「公网 IP 或域名[:外部端口]」。
+      </p>
+    </div>
+  </section>
+
+  <!-- ─────────── 右栏:状态 ─────────── -->
+  <section class="card">
+    <h2>推流状态</h2>
+
+    <div class="actions">
+      <button id="toggle" class="primary">开始共享</button>
+      <button id="restart" class="ghost">重启</button>
+      <span class="muted" id="uptime"></span>
+    </div>
+
+    <div class="field">
+      <div class="stat-row">
+        <span>当前观众</span>
+        <strong id="viewers">—</strong>
+      </div>
+      <div class="capacity">
+        <div class="capacity-bar"><div id="capacityFill"></div></div>
+        <span id="capacityText" class="muted"></span>
+      </div>
+    </div>
+
+    <div class="field" id="watchField">
+      <label>观看地址</label>
+      <div id="watchList"></div>
+      <div class="qr-wrap">
+        <img id="qr" alt="观看地址二维码" hidden>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>访问凭据</label>
+      <div class="watch-item">
+        <span class="kind">用户名</span>
+        <code id="credUser">—</code>
+        <button id="copyUser" type="button">复制</button>
+      </div>
+      <div class="watch-item">
+        <span class="kind">密码</span>
+        <code id="credPass">—</code>
+        <button id="copyPass" type="button">复制</button>
+      </div>
+      <p class="hint">
+        观众打开链接时,浏览器会弹出一次登录框,输入后自动记住。
+        <strong>链接和密码要分开告诉对方</strong> —— 只拿到链接是看不了的。
+        密码在首次运行时随机生成,存在配置里,每次启动都一样。
+      </p>
+    </div>
+
+    <div class="field error-box" id="errorBox" hidden>
+      <label>出错了</label>
+      <pre id="errorText"></pre>
+    </div>
+
+    <details class="field" id="cmdBox">
+      <summary>实际执行的命令</summary>
+      <pre id="cmdText"></pre>
+    </details>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
