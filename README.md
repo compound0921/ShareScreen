@@ -182,6 +182,26 @@ go build -ldflags "-H=windowsgui -s -w" -o sharescreen.exe .
 (`internal/icon/icon.go`)之后跑一次 `go run ./cmd/genicon` 重新生成即可
 (加 `-preview 目录` 可以把各尺寸导成 PNG 看效果)。
 
+### 发布
+
+```bash
+go run ./cmd/genrelease -version 0.1
+```
+
+一条命令把两个版本都编出来,产出在 `dist/`:
+
+| 文件 | 下载大小 | 内容 |
+|---|---|---|
+| `ShareScreen-0.1-standalone.zip` | **70 MB** | 内嵌版。解压出 162 MB 的单文件 exe,拷到哪都能跑 |
+| `ShareScreen-0.1-slim.exe` | **8 MB** | 侧载版。需要自己按[「准备」](#准备只有自己编译时才需要)放好 `tools/` |
+| `SHA256SUMS` | | 上面两个的校验和 |
+
+> 内嵌版**必须打成 zip 再发**:Go 的 `go:embed` 不做压缩,exe 里原样塞着 155 MB
+> 的工具,压成 zip 只剩四成 —— 下载量整整差一倍多。侧载版本来就只有 8 MB,
+> 没必要再包一层。
+
+`go run ./cmd/genrelease` 的 `-version` 只是写进文件名,留空则用当天日期。
+
 ---
 
 ## 更多文档
