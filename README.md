@@ -155,6 +155,11 @@ go build -tags embed_tools -ldflags "-H=windowsgui -s -w" -o sharescreen.exe .
 > `-H=windowsgui` 是去掉控制台窗口的关键,不加的话每次启动都会弹黑框。
 > `-s -w` 只去符号表,不影响功能。
 
+**关于图标:** `rsrc.syso` 是 exe 的图标资源,已生成好放在仓库里,`go build`
+会自动链进去 —— 不需要额外工具,也不用改构建命令。改了图标定义
+(`internal/icon/icon.go`)之后跑一次 `go run ./cmd/genicon` 重新生成即可
+(加 `-preview 目录` 可以把各尺寸导成 PNG 看效果)。
+
 ---
 
 ## 更多文档

@@ -22,7 +22,9 @@ func Run(a Actions) {
 	// 在 systray.Run 之前调用 SetIcon / SetTooltip 会报
 	// "tray not ready yet" 并被静默丢弃 —— 图标不会出现。
 	systray.Run(func() {
-		systray.SetIcon(iconICO())
+		if data := trayIcon(); data != nil {
+			systray.SetIcon(data)
+		}
 		systray.SetTooltip("ShareScreen")
 
 		// 双击图标 = 打开控制页。这是最常用的动作,给最快的路径。
