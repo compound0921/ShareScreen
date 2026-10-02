@@ -284,6 +284,17 @@ func (s *Server) viewerCount(cfg config.Config) int {
 	return st.Viewers
 }
 
+// playQuery 是拼在观看链接后面的查询串。
+//
+// MediaMTX 自带的播放页默认把 <video> 设成静音:
+//
+//	video.muted = parseBoolString(params.get("muted"), true);
+//	                                                    ↑ 默认值
+//
+// 结果就是画面一切正常、一点声音都没有 —— 太容易被误判成音频链路坏了。
+// 我们自己生成的链接一律带上 muted=0。
+const playQuery = "?muted=0"
+
 func (s *Server) watchURLs(cfg config.Config) []watchURL {
 	// 链接里不带凭据。
 	//
@@ -297,7 +308,7 @@ func (s *Server) watchURLs(cfg config.Config) []watchURL {
 	if s.lanIP != "" {
 		out = append(out, watchURL{
 			Label: "局域网",
-			URL:   fmt.Sprintf("http://%s:%d/%s/", s.lanIP, cfg.WebRTCPort, cfg.StreamPath),
+			URL:   fmt.Sprintf("http://%s:%d/%s/%s", s.lanIP, cfg.WebRTCPort, cfg.StreamPath, playQuery),
 			Kind:  "lan",
 		})
 	}
@@ -305,7 +316,7 @@ func (s *Server) watchURLs(cfg config.Config) []watchURL {
 	if cfg.PublicHost != "" {
 		out = append(out, watchURL{
 			Label: "公网",
-			URL:   fmt.Sprintf("http://%s/%s/", cfg.PublicHost, cfg.StreamPath),
+			URL:   fmt.Sprintf("http://%s/%s/%s", cfg.PublicHost, cfg.StreamPath, playQuery),
 			Kind:  "public",
 		})
 	}
