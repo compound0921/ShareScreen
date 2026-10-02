@@ -52,6 +52,10 @@ type Status struct {
 	OutputTail  []string `json:"outputTail,omitempty"`
 	TargetKbps  int      `json:"targetKbps"`
 	EncoderName string   `json:"encoderName,omitempty"`
+
+	// External 为真表示流是外部程序推过来的(OBS 直推),本程序没有
+	// 运行 ffmpeg。界面据此换一套文案,并且不显示 ffmpeg 的输出尾部。
+	External bool `json:"external"`
 }
 
 // Manager 管理 ffmpeg 子进程。
@@ -230,6 +234,13 @@ func (m *Manager) startOnce() error {
 	encoders := m.encoders
 	screenW, screenH := m.screenW, m.screenH
 	m.stMu.RUnlock()
+
+	// 外部推流模式(OBS 直推)下本程序不该启动 ffmpeg ——
+	// 流是 OBS 直接推给 MediaMTX 的。放在这里而不是各调用点,
+	// 是因为 Restart() 会在公网地址变化时被调到,那条路径容易漏。
+	if cfg.Video.External() {
+		return nil
+	}
 
 	enc, err := ffmpeg.ResolveEncoder(cfg.Video.Encoder, encoders)
 	if err != nil {

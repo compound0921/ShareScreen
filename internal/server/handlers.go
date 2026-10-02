@@ -17,12 +17,21 @@ type watchURL struct {
 	Kind  string `json:"kind"` // lan | public
 }
 
+// pushURL 是给外部推流程序(OBS)用的地址。
+type pushURL struct {
+	Label string `json:"label"`
+	URL   string `json:"url"`
+	Note  string `json:"note"`
+	Kind  string `json:"kind"` // whip | rtmp
+}
+
 type stateResponse struct {
 	Config    config.Config       `json:"config"`
 	Status    stream.Status       `json:"status"`
 	Viewers   int                 `json:"viewers"` // -1 表示未知
 	Capacity  int                 `json:"capacity"`
 	WatchURLs []watchURL          `json:"watchUrls"`
+	PushURLs  []pushURL           `json:"pushUrls"`
 	Encoders  []ffmpeg.Encoder    `json:"encoders"`
 	Presets   []config.Resolution `json:"presets"`
 }
@@ -52,13 +61,58 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, stateResponse{
 		Config:    cfg,
-		Status:    s.stream.Status(),
+		Status:    s.effectiveStatus(cfg),
 		Viewers:   s.viewerCount(cfg),
 		Capacity:  cfg.Capacity(),
 		WatchURLs: s.watchURLs(cfg),
+		PushURLs:  s.pushURLs(cfg),
 		Encoders:  encoders,
 		Presets:   presets,
 	})
+}
+
+// effectiveStatus 返回当前推流状态。
+//
+// 外部推流模式(OBS 直推)下本程序不跑 ffmpeg,手里没有它的状态,
+// 得改从 MediaMTX 看 —— 只有它知道有没有推流源连着。
+func (s *Server) effectiveStatus(cfg config.Config) stream.Status {
+	if !cfg.Video.External() {
+		return s.stream.Status()
+	}
+
+	st := stream.Status{External: true, TargetKbps: cfg.Video.BitrateKbps}
+
+	path, err := s.mtx.PathState(cfg.StreamPath)
+	if err != nil {
+		st.State = stream.StateFailed
+		st.LastError = "无法连接 MediaMTX: " + err.Error()
+		return st
+	}
+	if path.HasSource && path.Ready {
+		st.State = stream.StateRunning
+		st.Running = true
+	} else {
+		st.State = stream.StateStopped
+	}
+	return st
+}
+
+// pushURLs 返回外部推流程序(OBS)要填的地址。
+func (s *Server) pushURLs(cfg config.Config) []pushURL {
+	return []pushURL{
+		{
+			Label: "WHIP",
+			URL:   fmt.Sprintf("http://127.0.0.1:%d/%s/whip", cfg.WebRTCPort, cfg.StreamPath),
+			Note:  "含音频,推荐。需要 OBS 29 或更高版本。",
+			Kind:  "whip",
+		},
+		{
+			Label: "RTMP",
+			URL:   fmt.Sprintf("rtmp://127.0.0.1:%d/%s", cfg.RTMPPort, cfg.StreamPath),
+			Note:  "**只有画面,没有声音。** RTMP 传的是 AAC,而浏览器的 WebRTC 不支持 AAC,MediaMTX 也不做转码(实测)。仅在 WHIP 不可用时使用。",
+			Kind:  "rtmp",
+		},
+	}
 }
 
 // handleStatus 是轻量轮询端点,前端每 2 秒调一次。
@@ -69,7 +123,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := s.currentConfig()
 	writeJSON(w, http.StatusOK, statusResponse{
-		Status:   s.stream.Status(),
+		Status:   s.effectiveStatus(cfg),
 		Viewers:  s.viewerCount(cfg),
 		Capacity: cfg.Capacity(),
 	})
@@ -138,9 +192,16 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
+// externalNote 在外部推流模式下统一解释为什么这些按钮不起作用。
+const externalNote = "当前是 OBS 直推模式 —— 流的开关由 OBS 控制,本程序不推流。"
+
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.currentConfig().Video.External() {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "note": externalNote})
 		return
 	}
 	s.stream.Start()
@@ -152,6 +213,10 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.currentConfig().Video.External() {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "note": externalNote})
+		return
+	}
 	s.stream.Stop()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -159,6 +224,10 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.currentConfig().Video.External() {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "note": externalNote})
 		return
 	}
 	s.stream.Restart()

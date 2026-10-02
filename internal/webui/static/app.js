@@ -7,6 +7,10 @@ const els = {
   badge: $('badge'),
   source: $('source'),
   sourceHint: $('sourceHint'),
+  captureParams: $('captureParams'),
+  pushField: $('pushField'),
+  pushList: $('pushList'),
+  bitrateHint: $('bitrateHint'),
   windowField: $('windowField'),
   windowSelect: $('windowSelect'),
   refreshWindows: $('refreshWindows'),
@@ -43,7 +47,8 @@ const SOURCE_HINT = {
   screen_ddagrab: 'GPU 侧采集,CPU 占用最低,支持 60fps。但不支持单窗口,且同时只能有一个采集会话。',
   screen_gdigrab: '通用兜底。CPU 拷贝,帧率明显低于 GPU 采集,仅在其他方式不可用时使用。',
   window: '只能走兼容模式采集,且窗口被遮挡时画面会被遮挡物覆盖。',
-  obs: '从 OBS 虚拟摄像头读取,需要先在 OBS 里启动虚拟摄像头。参数由 OBS 画布决定。',
+  obs: '从 OBS 虚拟摄像头读取,需要先在 OBS 里启动虚拟摄像头。只有画面 —— 虚拟摄像头是纯视频设备,OBS 采到的音频不会跟着它走。要声音请用上一项。',
+  obs_push: 'OBS 直接把流推给 MediaMTX,本程序不参与采集。这是唯一能带声音的方式:桌面音频在 Windows 上没法被 ffmpeg 直接采集,只能由 OBS 采下来连同画面一起推。分辨率、帧率、编码器都在 OBS 里设。',
 };
 
 function fmtUptime(ms) {
@@ -118,10 +123,65 @@ function renderForm() {
 
 function renderSourceFields() {
   const src = els.source.value;
+  const external = src === 'obs_push';
+
   els.sourceHint.textContent = SOURCE_HINT[src] || '';
   els.windowField.hidden = src !== 'window';
+  els.pushField.hidden = !external;
+  // 分辨率/帧率/编码器在直推模式下由 OBS 决定,留着只会误导
+  els.captureParams.hidden = external;
+
+  els.bitrateHint.textContent = external
+    ? '填 OBS 里设的码率。它只用于估算能支撑几个观众 —— 实际推流码率由 OBS 决定。'
+    : '填实测的上传速率,不是套餐标称值。它只用于估算能支撑几个观众。';
+
   if (src === 'window') {
     loadWindows();
+  }
+}
+
+// copyText 把文本写进剪贴板并短暂改变按钮文案作为反馈。
+async function copyText(text, btn) {
+  const original = btn.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '已复制';
+  } catch {
+    btn.textContent = '复制失败';
+  }
+  setTimeout(() => { btn.textContent = original; }, 1200);
+}
+
+// renderPushURLs 显示外部推流程序(OBS)要填的地址。
+function renderPushURLs(urls) {
+  els.pushList.innerHTML = '';
+  if (!urls || !urls.length) return;
+
+  for (const u of urls) {
+    const row = document.createElement('div');
+    row.className = 'watch-item';
+
+    const kind = document.createElement('span');
+    kind.className = 'kind';
+    kind.textContent = u.label;
+
+    const code = document.createElement('code');
+    code.textContent = u.url;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '复制';
+    btn.onclick = () => copyText(u.url, btn);
+
+    row.append(kind, code, btn);
+    els.pushList.appendChild(row);
+
+    if (u.note) {
+      const note = document.createElement('p');
+      note.className = 'hint';
+      note.textContent = u.note;
+      els.pushList.appendChild(note);
+    }
   }
 }
 
@@ -216,10 +276,16 @@ function renderWatchURLs(urls) {
 function renderStatus() {
   const running = !!status.running;
   const state = status.state || 'stopped';
+  // 外部推流模式:流是 OBS 推过来的,本程序不跑 ffmpeg。
+  // 开关在 OBS 那边,所以这里不显示开始/停止按钮。
+  const external = !!status.external;
 
   // 徽章
   let cls = 'badge-idle', text = '已停止';
-  if (state === 'running') { cls = 'badge-running'; text = '共享中'; }
+  if (external) {
+    cls = running ? 'badge-running' : 'badge-idle';
+    text = running ? 'OBS 推流中' : '等待 OBS 推流';
+  } else if (state === 'running') { cls = 'badge-running'; text = '共享中'; }
   else if (state === 'starting') { cls = 'badge-busy'; text = '启动中…'; }
   else if (state === 'stopping') { cls = 'badge-busy'; text = '停止中…'; }
   else if (state === 'failed') { cls = 'badge-error'; text = '启动失败'; }
@@ -227,13 +293,18 @@ function renderStatus() {
   els.badge.textContent = text;
 
   // 主按钮
-  els.toggle.textContent = running ? '停止共享' : '开始共享';
-  els.toggle.classList.toggle('is-stop', running);
-  const busy = state === 'starting' || state === 'stopping';
-  els.toggle.disabled = busy;
-  els.restart.disabled = busy || !running || !config;
+  els.toggle.hidden = external;
+  els.restart.hidden = external;
+  if (!external) {
+    els.toggle.textContent = running ? '停止共享' : '开始共享';
+    els.toggle.classList.toggle('is-stop', running);
+    const busy = state === 'starting' || state === 'stopping';
+    els.toggle.disabled = busy;
+    els.restart.disabled = busy || !running || !config;
+  }
 
-  els.uptime.textContent = running ? fmtUptime(status.uptimeMs) : '';
+  // 外部模式下运行时长没有意义(我们不知道 OBS 推了多久)
+  els.uptime.textContent = (!external && running) ? fmtUptime(status.uptimeMs) : '';
 
   // 观众数
   const viewers = status.viewers;
@@ -268,8 +339,10 @@ function renderStatus() {
     els.errorBox.hidden = true;
   }
 
-  // 命令
-  els.cmdText.textContent = status.command || '(尚未启动过)';
+  // 命令。外部推流模式下本程序不跑 ffmpeg,显示命令没有意义。
+  els.cmdText.textContent = external
+    ? '(OBS 直推模式,本程序不运行 ffmpeg)'
+    : (status.command || '(尚未启动过)');
 }
 
 // ── 交互 ──
@@ -380,6 +453,7 @@ async function init() {
   renderEncoders();
   renderForm();
   renderWatchURLs(state.watchUrls);
+  renderPushURLs(state.pushUrls);
   renderStatus();
 
   // 只有采集源变化才重渲染条件字段 —— 它会顺带刷新窗口列表,

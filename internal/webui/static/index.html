@@ -25,9 +25,19 @@
         <option value="screen_ddagrab">屏幕(推荐,GPU 采集)</option>
         <option value="screen_gdigrab">屏幕(兼容模式)</option>
         <option value="window">单个窗口</option>
-        <option value="obs">OBS 虚拟摄像头</option>
+        <option value="obs">OBS 虚拟摄像头(只有画面)</option>
+        <option value="obs_push">OBS 直推(含音频)</option>
       </select>
       <p class="hint" id="sourceHint"></p>
+    </div>
+
+    <div class="field" id="pushField" hidden>
+      <label>在 OBS 里填这个地址</label>
+      <div id="pushList"></div>
+      <p class="hint">
+        OBS → 设置 → 直播 → 服务选 <strong>WHIP</strong>,把上面的地址粘进去,然后点「开始推流」。<br>
+        还要确认 OBS 的「混音器」里有<strong>桌面音频</strong> —— 那是这个模式唯一的音频来源。
+      </p>
     </div>
 
     <div class="field" id="windowField" hidden>
@@ -46,23 +56,33 @@
       </p>
     </div>
 
-    <div class="field">
-      <label for="resolution">分辨率</label>
-      <select id="resolution"></select>
-      <p class="hint">不缩放可走零拷贝路径,CPU 占用最低、画面最清晰。</p>
+    <!-- OBS 直推模式下由 OBS 决定,整组隐藏 -->
+    <div id="captureParams">
+      <div class="field">
+        <label for="resolution">分辨率</label>
+        <select id="resolution"></select>
+        <p class="hint">不缩放可走零拷贝路径,CPU 占用最低、画面最清晰。</p>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="fps">帧率</label>
+          <select id="fps">
+            <option value="60">60 fps</option>
+            <option value="30">30 fps</option>
+            <option value="20">20 fps</option>
+            <option value="15">15 fps</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="encoder">编码器</label>
+          <select id="encoder"></select>
+        </div>
+      </div>
     </div>
 
     <div class="row">
-      <div class="field">
-        <label for="fps">帧率</label>
-        <select id="fps">
-          <option value="60">60 fps</option>
-          <option value="30">30 fps</option>
-          <option value="20">20 fps</option>
-          <option value="15">15 fps</option>
-        </select>
-      </div>
-
       <div class="field">
         <label for="bitrate">码率</label>
         <select id="bitrate">
@@ -76,13 +96,6 @@
           <option value="12000">12 Mbps</option>
         </select>
       </div>
-    </div>
-
-    <div class="row">
-      <div class="field">
-        <label for="encoder">编码器</label>
-        <select id="encoder"></select>
-      </div>
 
       <div class="field">
         <label for="uplink">上行带宽</label>
@@ -92,7 +105,7 @@
         </div>
       </div>
     </div>
-    <p class="hint">填实测的上传速率,不是套餐标称值。它只用于估算能支撑几个观众。</p>
+    <p class="hint" id="bitrateHint">填实测的上传速率,不是套餐标称值。它只用于估算能支撑几个观众。</p>
 
     <div class="field">
       <label for="publicHost">公网地址(可选)</label>

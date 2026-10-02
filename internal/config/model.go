@@ -13,17 +13,36 @@ const (
 	SourceScreenGDI SourceType = "screen_gdigrab"
 	// 单个窗口 —— 只能用 gdigrab,ddagrab 不支持。
 	SourceWindow SourceType = "window"
-	// OBS 虚拟摄像头(通过 DirectShow 读取)。
+	// OBS 虚拟摄像头(通过 DirectShow 读取)。只有画面 —— 虚拟摄像头
+	// 是纯视频设备,OBS 采到的音频不会跟着它走。
 	SourceOBS SourceType = "obs"
+
+	// OBS 直接推流到 MediaMTX,本程序不启动 ffmpeg。
+	//
+	// 这是唯一能带音频的方式:桌面音频在 Windows 上没法被 ffmpeg 直接
+	// 采集(没有 WASAPI 输入设备,声卡也不提供"立体声混音"),只能由
+	// OBS 用 WASAPI 采下来,连同画面一起推过来。
+	//
+	// 必须走 WHIP 而不是 RTMP —— 见 §"为什么只能 WHIP"。
+	SourceOBSPush SourceType = "obs_push"
 )
 
 // ValidSource 报告 s 是否为已知的采集源。
 func ValidSource(s SourceType) bool {
 	switch s {
-	case SourceScreenDDAGrab, SourceScreenGDI, SourceWindow, SourceOBS:
+	case SourceScreenDDAGrab, SourceScreenGDI, SourceWindow, SourceOBS, SourceOBSPush:
 		return true
 	}
 	return false
+}
+
+// External 报告该采集源是否由外部程序推流。
+//
+// 为真时本程序不启动 ffmpeg —— MediaMTX 直接接收 OBS 推过来的流。
+// 分辨率、帧率、编码器这些参数都由 OBS 那边决定,我们只保留码率
+// 用来估算能支撑几个观众。
+func (v VideoConfig) External() bool {
+	return v.Source == SourceOBSPush
 }
 
 // VideoConfig 是推流参数。
