@@ -67,6 +67,10 @@ type Manager struct {
 	cfg      config.Config
 	encoders []ffmpeg.Encoder
 
+	// 桌面原始尺寸。用来识别"目标尺寸等于源尺寸"的伪缩放 —— 那种情况
+	// 不该走 hwdownload,否则白白丢掉零拷贝。0 表示未知。
+	screenW, screenH int
+
 	state       State
 	child       *proc.Child
 	startedAt   time.Time
@@ -99,6 +103,16 @@ func (m *Manager) SetConfig(cfg config.Config) {
 func (m *Manager) SetEncoders(list []ffmpeg.Encoder) {
 	m.stMu.Lock()
 	m.encoders = list
+	m.stMu.Unlock()
+}
+
+// SetScreenSize 告诉管理器采集源的原始尺寸(桌面分辨率)。
+//
+// 参数构造器靠它判断"目标分辨率等于桌面分辨率"这种伪缩放 ——
+// 不设置的话那种情况会走 hwdownload,无声地丢掉零拷贝路径。
+func (m *Manager) SetScreenSize(w, h int) {
+	m.stMu.Lock()
+	m.screenW, m.screenH = w, h
 	m.stMu.Unlock()
 }
 
@@ -214,6 +228,7 @@ func (m *Manager) startOnce() error {
 	m.stMu.RLock()
 	cfg := m.cfg
 	encoders := m.encoders
+	screenW, screenH := m.screenW, m.screenH
 	m.stMu.RUnlock()
 
 	enc, err := ffmpeg.ResolveEncoder(cfg.Video.Encoder, encoders)
@@ -222,7 +237,7 @@ func (m *Manager) startOnce() error {
 	}
 
 	target := fmt.Sprintf("rtmp://127.0.0.1:%d/%s", cfg.RTMPPort, cfg.StreamPath)
-	args, err := ffmpeg.BuildArgs(cfg.Video, enc, target)
+	args, err := ffmpeg.BuildArgs(cfg.Video, enc, target, screenW, screenH)
 	if err != nil {
 		return err
 	}

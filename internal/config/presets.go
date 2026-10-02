@@ -9,8 +9,9 @@ type Resolution struct {
 	Label  string `json:"label"`
 }
 
-// 相对桌面尺寸的缩放比例。0 表示原始分辨率。
-var presetScales = []float64{0, 0.75, 0.5, 0.375}
+// 相对桌面尺寸的缩放比例。原始分辨率("不缩放")单独作为第一项构造,
+// 不放在这个列表里 —— 它的 Width/Height 必须是 0,不是桌面尺寸。
+var presetScales = []float64{0.75, 0.5, 0.375}
 
 // ResolutionPresets 按桌面宽高比生成分辨率选项。
 //
@@ -28,17 +29,26 @@ func ResolutionPresets(desktopW, desktopH int) []Resolution {
 		}
 	}
 
-	var out []Resolution
-	seen := map[[2]int]bool{}
+	// ★ 第一项是"不缩放",它的 Width/Height 必须是 0,不能填桌面尺寸。
+	//
+	// 填了桌面尺寸(比如 2560×1600)参数构造器会认为这是一次真实缩放,
+	// 于是走 hwdownload 把帧从显存拷回内存再缩放 —— 即使缩放比例是 1:1,
+	// 那次拷贝照样发生,每帧十几 MB、60fps 下接近 1 GB/s。零拷贝路径
+	// 就这么被无声地丢掉了,而界面上显示的仍然是"原始分辨率,不缩放"。
+	//
+	// 这个错误不会报错,只会让 CPU 占用莫名其妙地高 —— 所以在这里挡住它。
+	out := []Resolution{{
+		Width:  0,
+		Height: 0,
+		Label:  fmt.Sprintf("原始 %d × %d(不缩放)", desktopW, desktopH),
+	}}
+
+	seen := map[[2]int]bool{{desktopW, desktopH}: true} // 避免下面再生成一个等尺寸的档位
 
 	for _, s := range presetScales {
-		var w, h int
-		if s == 0 {
-			w, h = desktopW, desktopH
-		} else {
-			w = int(float64(desktopW) * s)
-			h = int(float64(desktopH) * s)
-		}
+		w := int(float64(desktopW) * s)
+		h := int(float64(desktopH) * s)
+
 		// yuv420p 要求宽高为偶数
 		w -= w % 2
 		h -= h % 2
@@ -52,13 +62,12 @@ func ResolutionPresets(desktopW, desktopH int) []Resolution {
 		}
 		seen[key] = true
 
-		label := fmt.Sprintf("%d × %d", w, h)
-		if s == 0 {
-			label = fmt.Sprintf("原始 %d × %d(不缩放)", w, h)
-		}
-		out = append(out, Resolution{Width: w, Height: h, Label: label})
+		out = append(out, Resolution{
+			Width:  w,
+			Height: h,
+			Label:  fmt.Sprintf("%d × %d", w, h),
+		})
 	}
 
-	// 把"原始"作为第一项之外的默认推荐项,顺序保持从高到低即可
 	return out
 }

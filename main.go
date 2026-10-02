@@ -97,7 +97,7 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 			return err
 		}
 		target := fmt.Sprintf("rtmp://127.0.0.1:%d/%s", cfg.RTMPPort, cfg.StreamPath)
-		args, err := ffmpeg.BuildArgs(cfg.Video, enc, target)
+		args, err := ffmpeg.BuildArgs(cfg.Video, enc, target, desktopW, desktopH)
 		if err != nil {
 			return err
 		}
@@ -138,6 +138,7 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	if err != nil {
 		return err
 	}
+	manager.SetScreenSize(desktopW, desktopH)
 	defer manager.Close()
 
 	// ── 控制页服务 ──

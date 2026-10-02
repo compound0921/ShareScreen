@@ -53,12 +53,32 @@ func inputArgs(v config.VideoConfig) ([]string, error) {
 	return nil, fmt.Errorf("未知采集源: %s", v.Source)
 }
 
+// needsScaling 报告是否真的需要缩放。
+//
+// 两种情况都算"不需要":
+//   - 宽高为 0 —— 明确表示不缩放
+//   - 目标尺寸恰好等于源尺寸 —— 缩放比例 1:1,缩了等于没缩
+//
+// 第二种容易被忽略,但代价很实在:一旦按"要缩放"处理就会走 hwdownload,
+// 把帧从显存拷回内存,即使 1:1 也照样拷。2K 下每帧十六七 MB,
+// 60fps 就是接近 1GB/s 的无谓带宽消耗。而且它不报错,只表现为
+// CPU 占用莫名其妙地高。
+func needsScaling(v config.VideoConfig, srcW, srcH int) bool {
+	if v.Width <= 0 || v.Height <= 0 {
+		return false
+	}
+	if srcW > 0 && srcH > 0 && v.Width == srcW && v.Height == srcH {
+		return false
+	}
+	return true
+}
+
 // isZeroCopy 报告该采集源能否让硬件帧直达编码器。
 //
-// 只有 ddagrab 在"不缩放"时才可以。ddagrab 输出的 d3d11 帧一旦经过
+// 只有 ddagrab 且不需要缩放时才可以。ddagrab 输出的 d3d11 帧一旦经过
 // hwdownload 就变成普通内存帧,零拷贝路径即告结束。
-func isZeroCopy(v config.VideoConfig) bool {
-	return v.Source == config.SourceScreenDDAGrab && v.Width <= 0
+func isZeroCopy(v config.VideoConfig, srcW, srcH int) bool {
+	return v.Source == config.SourceScreenDDAGrab && !needsScaling(v, srcW, srcH)
 }
 
 // filterArgs 返回缩放相关的滤镜参数。
@@ -71,8 +91,8 @@ func isZeroCopy(v config.VideoConfig) bool {
 //     hwmap=derive_device=cuda + scale_cuda 报 "Function not implemented"。
 //     代价是每个全屏帧多一次 CPU 拷贝(2K 分辨率下约 16 MB/帧)。
 //  3. 非 ddagrab 的源本来就是内存帧,普通 scale 即可。
-func filterArgs(v config.VideoConfig) []string {
-	if v.Width <= 0 || v.Height <= 0 {
+func filterArgs(v config.VideoConfig, srcW, srcH int) []string {
+	if !needsScaling(v, srcW, srcH) {
 		return nil
 	}
 	scale := fmt.Sprintf("scale=%d:%d", v.Width, v.Height)
@@ -89,8 +109,8 @@ func filterArgs(v config.VideoConfig) []string {
 // 在 d3d11 硬件帧和软件格式之间插入一次不可能的转换,直接报
 // "Impossible to convert between the formats supported by the filter"。
 // 这种情况下 NVENC 内部会自行处理格式。
-func pixFmtArgs(v config.VideoConfig) []string {
-	if isZeroCopy(v) {
+func pixFmtArgs(v config.VideoConfig, srcW, srcH int) []string {
+	if isZeroCopy(v, srcW, srcH) {
 		return nil
 	}
 	return []string{"-pix_fmt", "yuv420p"}
