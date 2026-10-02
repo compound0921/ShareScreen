@@ -69,6 +69,7 @@ type Config struct {
 	PublicHost string `json:"publicHost,omitempty"`
 
 	ControlPort int    `json:"controlPort"`
+	RTSPPort    int    `json:"rtspPort"`
 	RTMPPort    int    `json:"rtmpPort"`
 	WebRTCPort  int    `json:"webrtcPort"`
 	UDPPort     int    `json:"udpPort"`
@@ -97,6 +98,7 @@ func Default() Config {
 		// 它只影响"可支撑观众数"的估算,不参与推流。
 		UplinkMbps:  10,
 		ControlPort: 8080,
+		RTSPPort:    o.RTSPPort,
 		RTMPPort:    o.RTMPPort,
 		WebRTCPort:  o.WebRTCPort,
 		UDPPort:     o.UDPPort,
@@ -134,6 +136,9 @@ func (c *Config) Normalize() {
 	}
 	if c.ControlPort <= 0 || c.ControlPort > 65535 {
 		c.ControlPort = d.ControlPort
+	}
+	if c.RTSPPort <= 0 || c.RTSPPort > 65535 {
+		c.RTSPPort = d.RTSPPort
 	}
 	if c.RTMPPort <= 0 || c.RTMPPort > 65535 {
 		c.RTMPPort = d.RTMPPort

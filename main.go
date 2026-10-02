@@ -294,6 +294,7 @@ func checkPorts(cfg config.Config) error {
 // 启动时和公网地址变化时都会用到,所以提取出来。
 func mtxOptions(c config.Config) mediamtx.Options {
 	return mediamtx.Options{
+		RTSPPort:        c.RTSPPort,
 		RTMPPort:        c.RTMPPort,
 		WebRTCPort:      c.WebRTCPort,
 		UDPPort:         c.UDPPort,

@@ -53,7 +53,12 @@ func BuildArgs(v config.VideoConfig, enc Encoder, target string, srcW, srcH int)
 	args = append(args, "-bf", "0")
 
 	args = append(args, pixFmtArgs(v, srcW, srcH)...)
-	args = append(args, "-f", "flv", target)
+
+	// 输出走 RTSP 而不是 RTMP:只有 RTSP 能原样携带 Opus,而 Opus 是
+	// 浏览器 WebRTC 唯一支持的音频编码。RTMP 只能带 AAC,MediaMTX 又
+	// 不做 AAC→Opus 转码,结果就是观众那边只有画面没有声音(实测)。
+	// 显式指定 TCP —— RTSP 默认走 UDP,丢包在推流侧是无法恢复的。
+	args = append(args, "-f", "rtsp", "-rtsp_transport", "tcp", target)
 
 	return args, nil
 }

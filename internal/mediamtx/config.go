@@ -10,7 +10,8 @@ import (
 
 // Options 是生成配置时需要外部决定的参数。
 type Options struct {
-	RTMPPort   int    // ffmpeg 推流入口,只绑回环
+	RTSPPort   int    // ffmpeg 推流入口(主),只绑回环
+	RTMPPort   int    // 推流入口(OBS 兼容),只绑回环
 	WebRTCPort int    // WHEP 拉流 + 内置播放器页面
 	UDPPort    int    // WebRTC 媒体流(ICE)
 	APIPort    int    // 管理 API,只绑回环
@@ -28,6 +29,7 @@ type Options struct {
 // DefaultOptions 返回本项目的默认端口。
 func DefaultOptions() Options {
 	return Options{
+		RTSPPort:   8554,
 		RTMPPort:   1935,
 		WebRTCPort: 8889,
 		UDPPort:    8189,
@@ -52,14 +54,21 @@ func WriteConfig(dir string, o Options) (string, error) {
 	fmt.Fprintf(&b, "api: yes\n")
 	fmt.Fprintf(&b, "apiAddress: 127.0.0.1:%d\n\n", o.APIPort)
 
-	// 只保留实际用到的两个协议,其余关掉以缩小攻击面
-	fmt.Fprintf(&b, "rtsp: no\n")
+	// 只保留实际用到的协议,其余关掉以缩小攻击面
 	fmt.Fprintf(&b, "hls: no\n")
 	fmt.Fprintf(&b, "srt: no\n")
 	// moq 会在工作目录生成自签证书,而我们用不到它
 	fmt.Fprintf(&b, "moq: no\n\n")
 
-	// 推流入口只绑回环 —— ffmpeg 就在本机,没有任何理由对外监听
+	// 推流入口只绑回环 —— ffmpeg 就在本机,没有任何理由对外监听。
+	//
+	// 主入口是 RTSP 而不是 RTMP:RTSP 能原样携带 Opus,而 Opus 是浏览器
+	// WebRTC 唯一支持的音频编码。走 RTMP 就得用 AAC,MediaMTX 不做
+	// AAC→Opus 转码,观众那边直接没声音(实测)。
+	fmt.Fprintf(&b, "rtsp: yes\n")
+	fmt.Fprintf(&b, "rtspAddress: 127.0.0.1:%d\n\n", o.RTSPPort)
+
+	// RTMP 只为兼容 OBS 保留 —— OBS 低版本只能用 RTMP 推过来(但那样没声音)。
 	fmt.Fprintf(&b, "rtmp: yes\n")
 	fmt.Fprintf(&b, "rtmpAddress: 127.0.0.1:%d\n\n", o.RTMPPort)
 

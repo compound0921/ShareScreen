@@ -162,7 +162,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 		// 公网地址写在 MediaMTX 的配置文件里(webrtcAdditionalHosts),
 		// 改了就得重写文件并重启它的进程。之后推流也必须跟着重启 ——
-		// MediaMTX 一重起,ffmpeg 的 RTMP 连接就断了。
+		// MediaMTX 一重起,ffmpeg 的推流连接就断了。
 		if old.PublicHost != updated.PublicHost && s.onTopo != nil {
 			if err := s.onTopo(updated); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{

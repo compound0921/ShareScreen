@@ -247,7 +247,7 @@ func (m *Manager) startOnce() error {
 		return err
 	}
 
-	target := fmt.Sprintf("rtmp://127.0.0.1:%d/%s", cfg.RTMPPort, cfg.StreamPath)
+	target := fmt.Sprintf("rtsp://127.0.0.1:%d/%s", cfg.RTSPPort, cfg.StreamPath)
 	args, err := ffmpeg.BuildArgs(cfg.Video, enc, target, screenW, screenH)
 	if err != nil {
 		return err
