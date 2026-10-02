@@ -17,7 +17,7 @@ import (
 // 端口被占用时,原来只是报个错就退出 —— 那是个死胡同:用户只知道"起不来",
 // 却不知道下一步该做什么。这里给两条出路:
 //
-//  1. 结束占用它的进程 —— 只在占用者确实是自家进程时才提供
+//  1. 结束占用它的进程 —— 只在占用者确实是自家进程时才做,而且不问
 //  2. 换一个空闲端口 —— 改了会写回配置,免得下次还问
 //
 // 两条都不选就退出。
@@ -153,21 +153,29 @@ func resolveConflict(cfg *config.Config, c *portConflict, cfgPath string) (bool,
 		return false, nil
 	}
 
-	// 只有占用者是自家的工具进程时才提供"结束它"。
+	// 占用者是自家的工具进程(残留的 mediamtx / ffmpeg)—— 直接结束,不问。
 	//
 	// 判据是**可执行文件的完整路径**,不是进程名 —— 用户完全可能自己开着
 	// ffmpeg 做别的事情,按名字杀会误伤。这条线这个项目一直守着。
+	//
+	// 为什么这里不再问:能走到这一步,说明端口上坐的是我们自己拉起来、
+	// 却没跟着上一个实例退干净的进程,它此刻唯一的作用就是挡路。真正的
+	// 选择只有一个,弹个框只是把它变成"读一段话再点一下"。占端口的是
+	// 别的程序时仍然会问 —— 那才是有代价的决定。
+	//
+	// 这一条也顺带覆盖了 WebRTC 那两个端口:残留的 mediamtx 让出 8889 之后
+	// 什么都不用改,路由器映射原样有效,自然也就不必走下面那条"不能自动换"
+	// 的路。
 	if isOurProcess(c.owner) {
-		q := fmt.Sprintf("%s 的 %s 端口 %d 被 %s 占用。\n\n要结束它,然后重试吗?",
-			c.label, c.proto(), c.port, c.ownerText())
-		if ask("ShareScreen 启动受阻", q) {
-			if err := netport.Kill(c.owner.PID); err != nil {
-				log.Printf("结束 PID %d 失败: %v", c.owner.PID, err)
-			} else {
-				log.Printf("已结束 %s(PID %d)", c.owner.Name, c.owner.PID)
-				waitPortFree(c.addr, c.udp, 3*time.Second)
-				return true, nil
-			}
+		if err := netport.Kill(c.owner.PID); err != nil {
+			// 杀不掉(多半是权限)就继续往下走,让用户还有换端口这条路,
+			// 而不是卡在这里报一个他无能为力的错。
+			log.Printf("结束残留的 %s(PID %d)失败: %v", c.owner.Name, c.owner.PID, err)
+		} else {
+			log.Printf("已结束残留的 %s(PID %d), %s 端口 %d 让出",
+				c.owner.Name, c.owner.PID, c.proto(), c.port)
+			waitPortFree(c.addr, c.udp, 3*time.Second)
+			return true, nil
 		}
 	}
 

@@ -144,8 +144,8 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	// 最常见的失败是上一次没退干净,或者自己已经开着一个实例。
 	//
 	// 被占用时不能直接退出 —— 那是个死胡同,用户只知道"起不来",却不知道
-	// 下一步做什么。交给 resolveConflict 去问,给两条出路:结束占用进程,
-	// 或者换个端口。每让一次路都要重新检查,最多让三次。
+	// 下一步做什么。交给 resolveConflict 处理:占着的是自家残留进程就直接
+	// 清掉,是别的程序才问要不要换端口。每让一次路都要重新检查,最多三次。
 	for attempt := 0; ; attempt++ {
 		conflict := findPortConflict(cfg)
 		if conflict == nil {
