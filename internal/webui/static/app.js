@@ -49,11 +49,11 @@ let saveTimer = null;
 
 // ── 工具 ──
 const SOURCE_HINT = {
-  screen_ddagrab: 'GPU 侧采集,CPU 占用最低,支持 60fps。但不支持单窗口,且同时只能有一个采集会话。',
-  screen_gdigrab: '通用兜底。CPU 拷贝,帧率明显低于 GPU 采集,仅在其他方式不可用时使用。',
-  window: '只能走兼容模式采集,且窗口被遮挡时画面会被遮挡物覆盖。',
-  obs: '从 OBS 虚拟摄像头读取,需要先在 OBS 里启动虚拟摄像头。它是纯视频设备,所以 OBS 里的混音不会跟着它走 —— 勾了「桌面音频」的话,观众听到的是你扬声器正在放的声音,不是 OBS 的混音结果。',
-  obs_push: 'OBS 直接把流推给 MediaMTX,本程序不参与采集。画面和声音全都由 OBS 提供 —— 需要多个来源叠加、加滤镜、做转场时用这个。分辨率、帧率、编码器、音频都在 OBS 里设。',
+  screen_ddagrab: 'CPU 占用最低,支持 60fps。不支持单窗口。',
+  screen_gdigrab: '通用兜底,帧率明显更低。',
+  window: '窗口被遮挡时,画面会被遮挡物盖住。',
+  obs: '需先在 OBS 里启动虚拟摄像头。声音仍来自桌面音频。',
+  obs_push: '画面和声音都由 OBS 提供,参数也在 OBS 里设。',
 };
 
 function fmtUptime(ms) {
@@ -153,8 +153,8 @@ function renderSourceFields() {
   renderAudioFields();
 
   els.bitrateHint.textContent = external
-    ? '填 OBS 里设的码率。它只用于估算能支撑几个观众 —— 实际推流码率由 OBS 决定。'
-    : '填实测的上传速率,不是套餐标称值。它只用于估算能支撑几个观众。';
+    ? '填 OBS 里设的码率,只用于估算观众数。'
+    : '填实测上传速率,只用于估算观众数。';
 
   if (src === 'window') {
     loadWindows();

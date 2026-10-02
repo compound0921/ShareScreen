@@ -35,8 +35,7 @@
       <label>在 OBS 里填这个地址</label>
       <div id="pushList"></div>
       <p class="hint">
-        OBS → 设置 → 直播 → 服务选 <strong>WHIP</strong>,把上面的地址粘进去,然后点「开始推流」。<br>
-        还要确认 OBS 的「混音器」里有<strong>桌面音频</strong> —— 那是这个模式唯一的音频来源。
+        OBS → 设置 → 直播 → 服务选 <strong>WHIP</strong>,粘上面的地址。
       </p>
     </div>
 
@@ -50,9 +49,7 @@
       <label for="windowTitle" class="gap-top">或手动填写标题</label>
       <input type="text" id="windowTitle" placeholder="窗口标题中包含的文字">
       <p class="hint">
-        按<strong>标题中包含的文字</strong>匹配,不要求完全一致。
-        窗口标题会变(浏览器切标签、编辑器换文件),变了就重新选一次。
-        窗口被其他窗口遮挡时,画面会被遮挡物覆盖。
+        按<strong>标题中包含的文字</strong>匹配,不必完全一致。标题变了就重新选。
       </p>
     </div>
 
@@ -61,7 +58,7 @@
       <div class="field">
         <label for="resolution">分辨率</label>
         <select id="resolution"></select>
-        <p class="hint">不缩放可走零拷贝路径,CPU 占用最低、画面最清晰。</p>
+        <p class="hint">不缩放时 CPU 最低、画面最清晰。</p>
       </div>
 
       <div class="row">
@@ -93,11 +90,7 @@
         <option value="128">128 kbps</option>
         <option value="192">192 kbps</option>
       </select>
-      <p class="hint">
-        采的是<strong>你听到的声音</strong> —— 默认播放设备正在放什么,观众就听到什么。
-        换耳机、切 HDMI、插蓝牙都会自动跟随,不需要改系统设置。<br>
-        采不到时会退化成无声画面并在这里给出提示,不会影响画面本身。
-      </p>
+      <p class="hint">换耳机、切 HDMI 都会自动跟随。</p>
     </div>
 
     <div class="row">
@@ -123,15 +116,13 @@
         </div>
       </div>
     </div>
-    <p class="hint" id="bitrateHint">填实测的上传速率,不是套餐标称值。它只用于估算能支撑几个观众。</p>
+    <p class="hint" id="bitrateHint">填实测上传速率,只用于估算观众数。</p>
 
     <div class="field">
       <label for="publicHost">公网地址(可选)</label>
       <input type="text" id="publicHost" placeholder="例如 example.com:8443">
       <p class="hint">
-        填了就显示公网观看链接,并把它声明给 MediaMTX。
-        <strong>必须填</strong>,否则公网观众拿到的全是内网地址,画面出不来。
-        格式为「公网 IP 或域名[:外部端口]」。
+        格式「IP 或域名[:端口]」。<strong>不填则公网观众看不到画面。</strong>
       </p>
     </div>
   </section>
@@ -166,14 +157,8 @@
     </div>
 
     <p class="hint">
-      播放路径<strong>不做鉴权</strong> —— 链接本身就是凭据,谁能打开链接谁就能看。
-      不要把地址发到公开场合。
-    </p>
-
-    <p class="hint">
-      链接末尾的 <code>?muted=0</code> <strong>不能丢</strong> —— MediaMTX 自带的
-      播放页默认是静音的,丢了它就只剩画面。若画面没有自动开始,点一下播放键 ——
-      浏览器不允许带声音自动播放。
+      <strong>不做鉴权</strong>,链接即凭据,别发到公开场合。<br>
+      末尾的 <code>?muted=0</code> 不能丢,丢了没声音。
     </p>
 
     <div class="field warn-box" id="warnBox" hidden>
