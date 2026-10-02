@@ -74,7 +74,9 @@ func Default() Config {
 			Encoder:     "",
 			KeyframeSec: 1,
 		},
-		UplinkMbps:  4.57,
+		// 上行带宽只是个起点,用户应当在界面里填实测值。
+		// 它只影响"可支撑观众数"的估算,不参与推流。
+		UplinkMbps:  10,
 		ControlPort: 8080,
 		RTMPPort:    o.RTMPPort,
 		WebRTCPort:  o.WebRTCPort,

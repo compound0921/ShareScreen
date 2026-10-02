@@ -69,7 +69,7 @@ func isZeroCopy(v config.VideoConfig) bool {
 //  2. ddagrab 要缩放时,唯一可行的写法是 hwdownload 回到内存再缩放。
 //     GPU 侧缩放的两条路都走不通:scale_d3d11 报 "Unsupported pixel format",
 //     hwmap=derive_device=cuda + scale_cuda 报 "Function not implemented"。
-//     代价是每个 2560×1600 帧多一次 16.4 MB 的 CPU 拷贝。
+//     代价是每个全屏帧多一次 CPU 拷贝(2K 分辨率下约 16 MB/帧)。
 //  3. 非 ddagrab 的源本来就是内存帧,普通 scale 即可。
 func filterArgs(v config.VideoConfig) []string {
 	if v.Width <= 0 || v.Height <= 0 {

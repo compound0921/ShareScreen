@@ -207,7 +207,7 @@ func (s *Server) watchURLs(cfg config.Config) []watchURL {
 			Kind:  "lan",
 		})
 	}
-	// PublicHost 允许带端口,例如 112.226.166.178:8443
+	// PublicHost 允许带端口,例如 example.com:8443
 	if cfg.PublicHost != "" {
 		out = append(out, watchURL{
 			Label: "公网",
