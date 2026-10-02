@@ -141,10 +141,28 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	}
 
 	// ── 端口预检 ──
-	// 最常见的失败是上一次没退干净,或者用户自己开了 MediaMTX。
-	// 提前报清楚,好过让 MediaMTX 启动失败后界面一片沉默。
-	if err := checkPorts(cfg); err != nil {
-		return err
+	// 最常见的失败是上一次没退干净,或者自己已经开着一个实例。
+	//
+	// 被占用时不能直接退出 —— 那是个死胡同,用户只知道"起不来",却不知道
+	// 下一步做什么。交给 resolveConflict 去问,给两条出路:结束占用进程,
+	// 或者换个端口。每让一次路都要重新检查,最多让三次。
+	for attempt := 0; ; attempt++ {
+		conflict := findPortConflict(cfg)
+		if conflict == nil {
+			break
+		}
+		if attempt >= maxPortRetries {
+			return conflict.err()
+		}
+		retry, err := resolveConflict(&cfg, conflict, cfgPath)
+		if err != nil {
+			return err
+		}
+		if !retry {
+			// 已经妥善收场(比如把已在运行的那个实例的控制页打开了),
+			// 正常退出即可,不用再报一次错。
+			return nil
+		}
 	}
 
 	// ── 写 MediaMTX 配置并启动 ──
@@ -299,32 +317,6 @@ func setupLogging(dataDir string) (func(), error) {
 }
 
 // checkPorts 确认关键端口没被占用。
-func checkPorts(cfg config.Config) error {
-	type probe struct {
-		name string
-		addr string
-	}
-	probes := []probe{
-		{"控制页", fmt.Sprintf("127.0.0.1:%d", cfg.ControlPort)},
-		{"ffmpeg 推流入口", fmt.Sprintf("127.0.0.1:%d", cfg.RTMPPort)},
-		{"MediaMTX 管理接口", fmt.Sprintf("127.0.0.1:%d", cfg.APIPort)},
-		{"WebRTC 播放端口", fmt.Sprintf("0.0.0.0:%d", cfg.WebRTCPort)},
-	}
-
-	for _, p := range probes {
-		ln, err := net.Listen("tcp", p.addr)
-		if err != nil {
-			return fmt.Errorf(
-				"%s 的端口 %s 已被占用。\n"+
-					"多半是上一次没有正常退出,或者你自己开着 MediaMTX。\n"+
-					"请先关掉占用该端口的程序再试。",
-				p.name, p.addr)
-		}
-		_ = ln.Close()
-	}
-	return nil
-}
-
 // mtxOptions 把本程序的配置映射成 MediaMTX 的配置参数。
 // 启动时和公网地址变化时都会用到,所以提取出来。
 func mtxOptions(c config.Config) mediamtx.Options {
