@@ -57,15 +57,6 @@ func run(cfgPath string, printArgs, noBrowser bool) error {
 	if err != nil {
 		log.Printf("警告: %v(使用默认配置)", err)
 	}
-	// 观看凭据缺失时补一组并落盘 —— 否则每次启动密码都会变,
-	// 已经发出去的链接就失效了。
-	if changed, cerr := cfg.EnsureCredentials(); cerr != nil {
-		log.Printf("警告: 生成观看凭据失败: %v", cerr)
-	} else if changed {
-		if serr := config.Save(cfgPath, cfg); serr != nil {
-			log.Printf("警告: 保存观看凭据失败: %v", serr)
-		}
-	}
 
 	// ── 定位第三方组件 ──
 	ffmpegTool, err := paths.ResolveFFmpeg()
@@ -261,8 +252,6 @@ func mtxOptions(c config.Config) mediamtx.Options {
 		APIPort:         c.APIPort,
 		StreamPath:      c.StreamPath,
 		AdditionalHosts: publicHosts(c),
-		ReadUser:        c.ViewerUser,
-		ReadPass:        c.ViewerPass,
 	}
 }
 

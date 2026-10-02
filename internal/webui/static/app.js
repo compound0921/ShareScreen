@@ -23,10 +23,6 @@ const els = {
   capacityText: $('capacityText'),
   watchList: $('watchList'),
   qr: $('qr'),
-  credUser: $('credUser'),
-  credPass: $('credPass'),
-  copyUser: $('copyUser'),
-  copyPass: $('copyPass'),
   errorBox: $('errorBox'),
   errorText: $('errorText'),
   cmdText: $('cmdText'),
@@ -168,22 +164,6 @@ function renderWatchURLs(urls) {
   const preferred = urls.find((u) => u.kind === 'public') || urls[0];
   els.qr.src = '/api/qr.png?t=' + encodeURIComponent(preferred.url);
   els.qr.hidden = false;
-}
-
-async function copyText(text, btn) {
-  const original = btn.textContent;
-  try {
-    await navigator.clipboard.writeText(text);
-    btn.textContent = '已复制';
-  } catch {
-    btn.textContent = '复制失败';
-  }
-  setTimeout(() => { btn.textContent = original; }, 1200);
-}
-
-function renderCredentials() {
-  els.credUser.textContent = config.viewerUser || '—';
-  els.credPass.textContent = config.viewerPass || '—';
 }
 
 function renderStatus() {
@@ -353,11 +333,7 @@ async function init() {
   renderEncoders();
   renderForm();
   renderWatchURLs(state.watchUrls);
-  renderCredentials();
   renderStatus();
-
-  els.copyUser.addEventListener('click', () => copyText(els.credUser.textContent, els.copyUser));
-  els.copyPass.addEventListener('click', () => copyText(els.credPass.textContent, els.copyPass));
 
   // 表单变更
   for (const el of [els.source, els.resolution, els.fps, els.bitrate,

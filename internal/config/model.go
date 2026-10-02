@@ -49,11 +49,6 @@ type Config struct {
 	// 程序不负责打通公网,只负责把它拼成可点的链接。
 	PublicHost string `json:"publicHost,omitempty"`
 
-	// 观看凭据。公网部署时用它们保护播放路径 —— 没有这个,任何扫到端口的人
-	// 都能看到你的屏幕。密码在首次运行时随机生成。
-	ViewerUser string `json:"viewerUser"`
-	ViewerPass string `json:"viewerPass"`
-
 	ControlPort int    `json:"controlPort"`
 	RTMPPort    int    `json:"rtmpPort"`
 	WebRTCPort  int    `json:"webrtcPort"`

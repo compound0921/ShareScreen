@@ -124,24 +124,10 @@
       </div>
     </div>
 
-    <div class="field">
-      <label>访问凭据</label>
-      <div class="watch-item">
-        <span class="kind">用户名</span>
-        <code id="credUser">—</code>
-        <button id="copyUser" type="button">复制</button>
-      </div>
-      <div class="watch-item">
-        <span class="kind">密码</span>
-        <code id="credPass">—</code>
-        <button id="copyPass" type="button">复制</button>
-      </div>
-      <p class="hint">
-        观众打开链接时,浏览器会弹出一次登录框,输入后自动记住。
-        <strong>链接和密码要分开告诉对方</strong> —— 只拿到链接是看不了的。
-        密码在首次运行时随机生成,存在配置里,每次启动都一样。
-      </p>
-    </div>
+    <p class="hint">
+      播放路径<strong>不做鉴权</strong> —— 链接本身就是凭据,谁能打开链接谁就能看。
+      不要把地址发到公开场合。
+    </p>
 
     <div class="field error-box" id="errorBox" hidden>
       <label>出错了</label>

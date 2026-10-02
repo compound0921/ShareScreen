@@ -23,11 +23,6 @@ type Options struct {
 	// (192.168.x.x、IPv6 地址)。公网浏览器拿到这些地址是连不上的 ——
 	// 症状是页面能打开、播放器一直转圈、媒体流永远建立不起来。
 	AdditionalHosts []string
-
-	// 播放路径的凭据。留空表示不鉴权 —— 只在纯局域网使用时可接受,
-	// 一旦端口映射到公网,不鉴权等于把屏幕公开。
-	ReadUser string
-	ReadPass string
 }
 
 // DefaultOptions 返回本项目的默认端口。
@@ -86,13 +81,11 @@ func WriteConfig(dir string, o Options) (string, error) {
 	}
 	b.WriteString("\n")
 
-	// 显式声明路径(不依赖 all_others 兜底)
+	// 显式声明路径(不依赖 all_others 兜底)。
+	// 不设 readUser/readPass —— 播放路径不做鉴权,观众点开链接就能看。
+	// 换句话说,链接本身就是凭据,别把它发到公开场合。
 	fmt.Fprintf(&b, "paths:\n")
 	fmt.Fprintf(&b, "  %s:\n", o.StreamPath)
-	if o.ReadUser != "" && o.ReadPass != "" {
-		fmt.Fprintf(&b, "    readUser: %s\n", yamlString(o.ReadUser))
-		fmt.Fprintf(&b, "    readPass: %s\n", yamlString(o.ReadPass))
-	}
 
 	path := filepath.Join(dir, "mediamtx.yml")
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
@@ -101,29 +94,3 @@ func WriteConfig(dir string, o Options) (string, error) {
 	return path, nil
 }
 
-// yamlString 把任意字符串安全地写成 YAML 双引号标量。
-//
-// 一律加引号而不是"只在需要时加":凭据是随机生成的,与其去想哪些字符会
-// 和 YAML 语法冲突,不如统一处理。非 ASCII 字符直接原样保留 —— 文件是
-// UTF-8 写的,YAML 接受。
-func yamlString(s string) string {
-	var b strings.Builder
-	b.WriteByte('"')
-	for _, r := range s {
-		switch r {
-		case '"', '\\':
-			b.WriteByte('\\')
-			b.WriteRune(r)
-		case '\n':
-			b.WriteString("\\n")
-		case '\r':
-			b.WriteString("\\r")
-		case '\t':
-			b.WriteString("\\t")
-		default:
-			b.WriteRune(r)
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
-}
