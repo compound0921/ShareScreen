@@ -175,6 +175,26 @@ select {
   line-height: 1.5;
 }
 
+/* 复选框那行:文字要和输入框一样醒目,所以覆盖 label 的默认样式 */
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+}
+.check input[type="checkbox"] {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 /* ── 按钮 ── */
 .actions {
   display: flex;
@@ -295,6 +315,15 @@ button.ghost:hover:not(:disabled) { border-color: var(--text-dim); }
   padding: 12px;
 }
 .error-box label { color: var(--danger); }
+
+/* 警告:推流本身是好的,只是少了点东西(目前只有音频采集失败) */
+.warn-box {
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  padding: 12px;
+}
+.warn-box label { color: var(--warn); }
+.warn-box pre { max-height: 120px; }
 
 pre {
   margin: 0;

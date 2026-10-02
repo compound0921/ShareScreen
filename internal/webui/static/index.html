@@ -82,6 +82,24 @@
       </div>
     </div>
 
+    <div class="field" id="audioField">
+      <label class="check">
+        <input type="checkbox" id="audioEnabled">
+        <span>共享桌面音频</span>
+      </label>
+      <select id="audioBitrate" class="gap-top">
+        <option value="64">64 kbps</option>
+        <option value="96">96 kbps</option>
+        <option value="128">128 kbps</option>
+        <option value="192">192 kbps</option>
+      </select>
+      <p class="hint">
+        采的是<strong>你听到的声音</strong> —— 默认播放设备正在放什么,观众就听到什么。
+        换耳机、切 HDMI、插蓝牙都会自动跟随,不需要改系统设置。<br>
+        采不到时会退化成无声画面并在这里给出提示,不会影响画面本身。
+      </p>
+    </div>
+
     <div class="row">
       <div class="field">
         <label for="bitrate">码率</label>
@@ -151,6 +169,11 @@
       播放路径<strong>不做鉴权</strong> —— 链接本身就是凭据,谁能打开链接谁就能看。
       不要把地址发到公开场合。
     </p>
+
+    <div class="field warn-box" id="warnBox" hidden>
+      <label>提示</label>
+      <pre id="warnText"></pre>
+    </div>
 
     <div class="field error-box" id="errorBox" hidden>
       <label>出错了</label>

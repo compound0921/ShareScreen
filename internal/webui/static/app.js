@@ -15,6 +15,9 @@ const els = {
   windowSelect: $('windowSelect'),
   refreshWindows: $('refreshWindows'),
   windowTitle: $('windowTitle'),
+  audioField: $('audioField'),
+  audioEnabled: $('audioEnabled'),
+  audioBitrate: $('audioBitrate'),
   resolution: $('resolution'),
   fps: $('fps'),
   bitrate: $('bitrate'),
@@ -29,6 +32,8 @@ const els = {
   capacityText: $('capacityText'),
   watchList: $('watchList'),
   qr: $('qr'),
+  warnBox: $('warnBox'),
+  warnText: $('warnText'),
   errorBox: $('errorBox'),
   errorText: $('errorText'),
   cmdText: $('cmdText'),
@@ -47,8 +52,8 @@ const SOURCE_HINT = {
   screen_ddagrab: 'GPU 侧采集,CPU 占用最低,支持 60fps。但不支持单窗口,且同时只能有一个采集会话。',
   screen_gdigrab: '通用兜底。CPU 拷贝,帧率明显低于 GPU 采集,仅在其他方式不可用时使用。',
   window: '只能走兼容模式采集,且窗口被遮挡时画面会被遮挡物覆盖。',
-  obs: '从 OBS 虚拟摄像头读取,需要先在 OBS 里启动虚拟摄像头。只有画面 —— 虚拟摄像头是纯视频设备,OBS 采到的音频不会跟着它走。要声音请用上一项。',
-  obs_push: 'OBS 直接把流推给 MediaMTX,本程序不参与采集。这是唯一能带声音的方式:桌面音频在 Windows 上没法被 ffmpeg 直接采集,只能由 OBS 采下来连同画面一起推。分辨率、帧率、编码器都在 OBS 里设。',
+  obs: '从 OBS 虚拟摄像头读取,需要先在 OBS 里启动虚拟摄像头。它是纯视频设备,所以 OBS 里的混音不会跟着它走 —— 勾了「桌面音频」的话,观众听到的是你扬声器正在放的声音,不是 OBS 的混音结果。',
+  obs_push: 'OBS 直接把流推给 MediaMTX,本程序不参与采集。画面和声音全都由 OBS 提供 —— 需要多个来源叠加、加滤镜、做转场时用这个。分辨率、帧率、编码器、音频都在 OBS 里设。',
 };
 
 function fmtUptime(ms) {
@@ -109,6 +114,19 @@ function renderForm() {
   els.uplink.value = String(config.uplinkMbps);
   els.publicHost.value = config.publicHost || '';
 
+  const a = config.audio || {};
+  const abr = a.bitrateKbps || 96;
+  els.audioEnabled.checked = !!a.enabled;
+  els.audioBitrate.value = String(abr);
+  // 码率可能不在预设列表里(比如手工改过配置文件)
+  if (els.audioBitrate.value !== String(abr)) {
+    const opt = document.createElement('option');
+    opt.value = String(abr);
+    opt.textContent = abr + ' kbps';
+    els.audioBitrate.appendChild(opt);
+    els.audioBitrate.value = String(abr);
+  }
+
   // 码率可能不在预设列表里(比如手工改过配置文件)
   if (els.bitrate.value !== String(v.bitrateKbps)) {
     const opt = document.createElement('option');
@@ -128,8 +146,11 @@ function renderSourceFields() {
   els.sourceHint.textContent = SOURCE_HINT[src] || '';
   els.windowField.hidden = src !== 'window';
   els.pushField.hidden = !external;
-  // 分辨率/帧率/编码器在直推模式下由 OBS 决定,留着只会误导
+  // 分辨率/帧率/编码器/音频在直推模式下都由 OBS 决定,留着只会误导
   els.captureParams.hidden = external;
+  els.audioField.hidden = external;
+
+  renderAudioFields();
 
   els.bitrateHint.textContent = external
     ? '填 OBS 里设的码率。它只用于估算能支撑几个观众 —— 实际推流码率由 OBS 决定。'
@@ -138,6 +159,11 @@ function renderSourceFields() {
   if (src === 'window') {
     loadWindows();
   }
+}
+
+// renderAudioFields 只在勾了音频时才显示码率 —— 没开音频时它没有意义。
+function renderAudioFields() {
+  els.audioBitrate.hidden = !els.audioEnabled.checked;
 }
 
 // copyText 把文本写进剪贴板并短暂改变按钮文案作为反馈。
@@ -331,6 +357,15 @@ function renderStatus() {
     els.capacityText.textContent = `可支撑 ${capacity} 人`;
   }
 
+  // 警告 —— 推流本身是好的,只是少了点东西(目前只有音频采集失败)。
+  // 和下面的错误分开显示,免得用户以为整个共享挂了。
+  if (status.warning) {
+    els.warnText.textContent = status.warning;
+    els.warnBox.hidden = false;
+  } else {
+    els.warnBox.hidden = true;
+  }
+
   // 错误
   if (status.lastError) {
     els.errorText.textContent = status.lastError;
@@ -361,6 +396,13 @@ function collectVideo() {
   };
 }
 
+function collectAudio() {
+  return {
+    enabled: els.audioEnabled.checked,
+    bitrateKbps: Number(els.audioBitrate.value) || 96,
+  };
+}
+
 function scheduleSave() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveConfig, 400); // 防抖:等用户改完再发
@@ -371,6 +413,7 @@ async function saveConfig() {
   const next = {
     ...config,
     video: collectVideo(),
+    audio: collectAudio(),
     uplinkMbps: Number(els.uplink.value) || config.uplinkMbps,
     publicHost: els.publicHost.value.trim(),
   };
@@ -463,10 +506,16 @@ async function init() {
     scheduleSave();
   });
 
-  for (const el of [els.resolution, els.fps, els.bitrate,
-                    els.encoder, els.uplink, els.publicHost]) {
+  for (const el of [els.resolution, els.fps, els.bitrate, els.encoder,
+                    els.audioBitrate, els.uplink, els.publicHost]) {
     el.addEventListener('change', scheduleSave);
   }
+
+  // 音频开关除了存配置,还要切换码率那行的显隐。
+  els.audioEnabled.addEventListener('change', () => {
+    renderAudioFields();
+    scheduleSave();
+  });
 
   // 从列表里选中窗口 → 写进标题输入框(标题框仍是唯一的数据来源)
   els.windowSelect.addEventListener('change', () => {
