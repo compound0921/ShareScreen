@@ -10,6 +10,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -27,30 +28,39 @@ import (
 	"sharescreen/internal/screen"
 	"sharescreen/internal/server"
 	"sharescreen/internal/stream"
+	"sharescreen/internal/tray"
 )
 
 func main() {
 	cfgPath := flag.String("config", "", "配置文件路径(默认放在 %LOCALAPPDATA%\\ShareScreen\\config.json)")
 	printArgs := flag.Bool("print-args", false, "打印将要执行的 ffmpeg 命令后退出(用于排查参数问题)")
 	noBrowser := flag.Bool("no-browser", false, "启动后不自动打开浏览器")
+	noTray := flag.Bool("no-tray", false, "不创建系统托盘图标")
 	flag.Parse()
 
 	// 不声明 DPI 感知的话,系统会返回被缩放过的桌面尺寸,
 	// 分辨率预设的宽高比就会算错。
 	screen.SetDPIAware()
 
-	if err := run(*cfgPath, *printArgs, *noBrowser); err != nil {
+	if err := run(*cfgPath, *printArgs, *noBrowser, *noTray); err != nil {
 		log.Fatalf("错误: %v", err)
 	}
 }
 
-func run(cfgPath string, printArgs, noBrowser bool) error {
+func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
+	// ── 数据目录与日志 ──
+	dataDir, err := paths.DataDir()
+	if err != nil {
+		return err
+	}
+	if closeLog, lerr := setupLogging(dataDir); lerr != nil {
+		log.Printf("警告: 无法写入日志文件: %v", lerr)
+	} else {
+		defer closeLog()
+	}
+
 	// ── 配置 ──
 	if cfgPath == "" {
-		dataDir, err := paths.DataDir()
-		if err != nil {
-			return err
-		}
 		cfgPath = filepath.Join(dataDir, "config.json")
 	}
 	cfg, err := config.Load(cfgPath)
@@ -103,10 +113,6 @@ func run(cfgPath string, printArgs, noBrowser bool) error {
 	}
 
 	// ── 写 MediaMTX 配置并启动 ──
-	dataDir, err := paths.DataDir()
-	if err != nil {
-		return err
-	}
 	mtxConfig, err := mediamtx.WriteConfig(dataDir, mtxOptions(cfg))
 	if err != nil {
 		return err
@@ -200,6 +206,26 @@ func run(cfgPath string, printArgs, noBrowser bool) error {
 		log.Printf("局域网观看地址: http://%s:%d/%s", ip, cfg.WebRTCPort, cfg.StreamPath)
 	}
 
+	// ── 系统托盘 ──
+	//
+	// 程序以 GUI 子系统构建(没有控制台窗口),托盘图标就是它"正在运行"的
+	// 可见标志,也是唯一的操作入口。
+	trayDone := make(chan struct{})
+	if !noTray {
+		go func() {
+			defer close(trayDone)
+			tray.Run(tray.Actions{
+				OpenControl: func() { openBrowser(controlURL) },
+				StartShare:  manager.Start,
+				StopShare:   manager.Stop,
+				Quit: func() {
+					log.Printf("收到托盘退出请求")
+					stop() // 取消 ctx,走正常收尾流程
+				},
+			})
+		}()
+	}
+
 	if !noBrowser {
 		openBrowser(controlURL)
 	}
@@ -212,7 +238,28 @@ func run(cfgPath string, printArgs, noBrowser bool) error {
 		// manager 和 runner 的 defer Close 会停掉子进程;
 		// 即便这条路径没走到,Job Object 的 KILL_ON_JOB_CLOSE 也会兜底。
 		return nil
+	case <-trayDone:
+		log.Printf("托盘已退出,程序结束")
+		return nil
 	}
+}
+
+// setupLogging 让日志同时写入文件和控制台(如果存在)。
+//
+// 程序以 GUI 子系统构建,没有控制台,文件是唯一的日志去处。
+// 从终端运行时 stderr 仍然有效,两边都写,调试时不用去翻文件。
+//
+// 每次启动截断:日志是用来诊断"这一次"的,无限追加没有意义,
+// 而且崩过一次之后你会先看日志再重启,不会被截断影响。
+func setupLogging(dataDir string) (func(), error) {
+	path := filepath.Join(dataDir, "sharescreen.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return func() {}, err
+	}
+	log.SetOutput(io.MultiWriter(f, os.Stderr))
+	log.Printf("日志文件: %s", path)
+	return func() { _ = f.Close() }, nil
 }
 
 // checkPorts 确认关键端口没被占用。

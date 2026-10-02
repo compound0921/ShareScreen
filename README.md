@@ -17,7 +17,18 @@ Windows 屏幕共享。本机采集画面,别人用浏览器打开链接就能�
 
 ## 运行
 
-双击 `sharescreen.exe`。浏览器会自动打开控制页。
+双击 `sharescreen.exe`。浏览器会自动打开控制页,任务栏托盘出现一个图标。
+
+程序没有窗口,运行期间靠托盘操作:
+
+| 操作 | 效果 |
+|---|---|
+| **双击图标** | 打开控制页 |
+| 右键 → 打开控制页 | 同上 |
+| 右键 → 开始 / 停止共享 | 不用切到浏览器 |
+| 右键 → 退出 | 停止共享并退出 |
+
+日志写在 `%LOCALAPPDATA%\ShareScreen\sharescreen.log`,每次启动覆盖。
 
 ## 使用
 
@@ -76,9 +87,20 @@ Windows 屏幕共享。本机采集画面,别人用浏览器打开链接就能�
 
 ## 停止
 
-关掉窗口即可 —— ffmpeg 和 MediaMTX 会一起退出,不留残留进程。
+托盘图标右键 → 退出。ffmpeg 和 MediaMTX 会一起退出,不留残留进程。
 
-从源码构建:`go build -o sharescreen.exe .`(需要 Go 1.27+)。国内建议先 `go env -w GOPROXY=https://goproxy.cn,direct`。
+---
+
+从源码构建:
+
+```bash
+go build -ldflags "-H=windowsgui -s -w" -o sharescreen.exe .
+```
+
+需要 Go 1.27+。国内建议先 `go env -w GOPROXY=https://goproxy.cn,direct`。
+
+> `-H=windowsgui` 是去掉控制台窗口的关键 —— 不加的话每次启动都会弹一个黑框。
+> `-s -w` 只是去符号表,体积从 12 MB 降到 8 MB,不影响功能。
 
 ---
 
