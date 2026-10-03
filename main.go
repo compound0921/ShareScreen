@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"sharescreen/internal/ffmpeg"
 	"sharescreen/internal/mediamtx"
 	"sharescreen/internal/paths"
+	"sharescreen/internal/portmap"
 	"sharescreen/internal/screen"
 	"sharescreen/internal/server"
 	"sharescreen/internal/stream"
@@ -197,6 +199,13 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	// ── 控制页服务 ──
 	ip := lanIP()
 
+	// topoMu 串行化重建 MediaMTX。
+	//
+	// 有两条路会在任意时刻触发它:用户在控制页改公网地址(HTTP 处理器),
+	// 以及自动映射拿到新的公网 IP(后台协程)。撞在一起就是两个 goroutine
+	// 同时停、同时起同一个子进程 —— 后一个会把前一个刚拉起来的杀掉。
+	var topoMu sync.Mutex
+
 	// 公网地址变化时重建 MediaMTX:那个值写在它的配置文件里,不重建就不生效。
 	//
 	// 这里必须带重试。MediaMTX 不响应 stdin,Stop 实际上是强杀,而 Windows
@@ -204,6 +213,9 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	// (比如观众页面刚断开),紧接着的 bind 会失败。实测这个失败是间歇性的,
 	// 加一次退避重试就能稳定通过。
 	restartMTX := func(c config.Config) error {
+		topoMu.Lock()
+		defer topoMu.Unlock()
+
 		p, err := mediamtx.WriteConfig(dataDir, mtxOptions(c))
 		if err != nil {
 			return err
@@ -234,6 +246,23 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		return lastErr
 	}
 
+	// ── 自动端口映射 ──
+	//
+	// 让程序自己通过 UPnP 去路由器上开端口,省掉"进路由器后台手动加两条映射"
+	// 那一步。默认关闭 —— 开端口是对外动作,而且大量路由器关着 UPnP 或在
+	// 运营商级 NAT 后面,失败时必须安静退回手动模式,不能影响启动。
+	//
+	// applyHost 要在 server 造出来之后才能赋值,所以这里用一层间接:
+	// 回调只在 mapper 启用之后才可能被调到,而启用发生在赋值之后,
+	// 中间隔着一次 channel 发送,顺序是有保证的。
+	var applyHost func(string)
+	mapper := portmap.New(portmap.Options{
+		InternalIP: ip,
+		Rules:      portmap.RulesFor(cfg.WebRTCPort, cfg.UDPPort),
+		OnChange:   func(externalIP string) { applyHost(externalIP) },
+	})
+	defer mapper.Close()
+
 	srv := server.New(server.Options{
 		Stream:           manager,
 		Runner:           runner,
@@ -243,8 +272,15 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		LANIP:            ip,
 		ConfigPath:       cfgPath,
 		Config:           cfg,
+		PortMap:          mapper,
 		OnTopologyChange: restartMTX,
 	})
+
+	applyHost = srv.ApplyAutoPublicHost
+	if cfg.AutoPortMap {
+		log.Printf("自动端口映射:已启用,正在查找路由器…")
+		mapper.SetEnabled(true)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -125,6 +125,24 @@
         格式「IP 或域名[:端口]」。<strong>不填则公网观众看不到画面。</strong>
       </p>
     </div>
+
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" id="autoPortMap">
+        <span>自动配置路由器端口映射(UPnP)</span>
+      </label>
+      <p class="hint">
+        打开后由程序自己去路由器上开端口,不用再进路由器后台手动加。
+        <strong>很多路由器关着 UPnP 或在运营商级 NAT 之后</strong>,那就只能手动配。
+      </p>
+
+      <div class="portmap-status" id="portmapStatus" hidden>
+        <span class="pm-dot" id="portmapDot"></span>
+        <span id="portmapText"></span>
+      </div>
+      <p class="hint" id="portmapHint" hidden></p>
+      <button type="button" id="portmapRetry" class="ghost" hidden>重新检测</button>
+    </div>
   </section>
 
   <!-- ─────────── 右栏:状态 ─────────── -->

@@ -195,6 +195,27 @@ select {
   cursor: pointer;
 }
 
+/* ── 自动端口映射的状态行 ── */
+.portmap-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* 小圆点表示三种结局:进行中 / 成功 / 用不了。
+   颜色之外还有文案,不靠颜色单独传达信息。 */
+.pm-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim, #9ca3af);
+}
+.pm-dot.ok { background: #16a34a; }
+.pm-dot.bad { background: #d97706; }
+
 /* ── 按钮 ── */
 .actions {
   display: flex;

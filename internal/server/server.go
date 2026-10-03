@@ -17,9 +17,21 @@ import (
 	"sharescreen/internal/config"
 	"sharescreen/internal/ffmpeg"
 	"sharescreen/internal/mediamtx"
+	"sharescreen/internal/portmap"
 	"sharescreen/internal/stream"
 	"sharescreen/internal/webui"
 )
+
+// PortMapper 是控制页需要的自动端口映射能力。
+//
+// 定成接口而不是直接用 *portmap.Mapper,是为了让 server 的测试不必碰真实网络 ——
+// 这个包里的东西都围绕 HTTP 处理器,不该被 UPnP 拖下水。
+type PortMapper interface {
+	Snapshot() portmap.Snapshot
+	SetEnabled(on bool)
+	Configure(rules []portmap.Rule, internalIP string)
+	Retry()
+}
 
 // Server 持有控制页需要的全部依赖和可变状态。
 type Server struct {
@@ -31,6 +43,7 @@ type Server struct {
 	lanIP    string
 	cfgPath  string
 	onTopo   func(config.Config) error
+	portMap  PortMapper
 
 	cfgMu sync.RWMutex
 	cfg   config.Config
@@ -45,6 +58,9 @@ type Options struct {
 	LANIP      string
 	ConfigPath string
 	Config     config.Config
+
+	// PortMap 为 nil 表示这一版没有自动映射能力,相关界面元素不显示。
+	PortMap PortMapper
 
 	// OnTopologyChange 在需要重建 MediaMTX 配置时调用。
 	//
@@ -65,6 +81,7 @@ func New(o Options) *Server {
 		cfgPath:  o.ConfigPath,
 		cfg:      o.Config,
 		onTopo:   o.OnTopologyChange,
+		portMap:  o.PortMap,
 	}
 	s.stream.SetConfig(o.Config)
 	s.stream.SetEncoders(o.Encoders)
@@ -89,6 +106,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/encoders", s.handleEncoders)
 	mux.HandleFunc("/api/qr.png", s.handleQR)
 	mux.HandleFunc("/api/windows", s.handleWindows)
+	mux.HandleFunc("/api/portmap/retry", s.handlePortMapRetry)
 
 	return mux
 }

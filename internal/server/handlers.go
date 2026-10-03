@@ -3,10 +3,14 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"net"
 	"net/http"
+	"strconv"
 
 	"sharescreen/internal/config"
 	"sharescreen/internal/ffmpeg"
+	"sharescreen/internal/portmap"
 	"sharescreen/internal/stream"
 	"sharescreen/internal/window"
 )
@@ -40,6 +44,13 @@ type statusResponse struct {
 	Status   stream.Status `json:"status"`
 	Viewers  int           `json:"viewers"`
 	Capacity int           `json:"capacity"`
+
+	// PublicHost 一并下发,是为了让前端认得出公网地址被自动映射改掉了 ——
+	// 改了就得重新渲染观看链接,否则页面上挂的还是旧地址。
+	PublicHost string `json:"publicHost"`
+
+	// PortMap 是自动端口映射的状态快照;没启用这一版功能时为 nil。
+	PortMap *portmap.Snapshot `json:"portMap,omitempty"`
 }
 
 // handleState 返回首屏需要的全部信息。
@@ -122,11 +133,56 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := s.currentConfig()
-	writeJSON(w, http.StatusOK, statusResponse{
-		Status:   s.effectiveStatus(cfg),
-		Viewers:  s.viewerCount(cfg),
-		Capacity: cfg.Capacity(),
-	})
+	resp := statusResponse{
+		Status:     s.effectiveStatus(cfg),
+		Viewers:    s.viewerCount(cfg),
+		Capacity:   cfg.Capacity(),
+		PublicHost: cfg.PublicHost,
+	}
+	if s.portMap != nil {
+		// Snapshot 内部加锁复制 —— 后台协程正在改那份状态,不能直接把
+		// Mapper 塞进响应里。拿到的既然是副本,这里就可以按配置补话。
+		snap := s.portMap.Snapshot()
+		noteHostMismatch(cfg, &snap)
+		resp.PortMap = &snap
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// noteHostMismatch 在"自动映射开的端口"和"公网地址里写的端口"对不上时出声。
+//
+// 自动映射按内外端口一致的原则开 WebRTCPort,而用户手填的公网地址可能写了
+// 别的端口(比如照着手动部署文档写的 8443)。两边对不上时,映射本身是成功的、
+// 状态灯也是绿的,但链接就是打不开 —— 这种"每一步看着都对"的故障最难查,
+// 所以宁可在这里把话说明白。
+//
+// 改动的是传进来的副本,不是 Mapper 内部的状态。
+func noteHostMismatch(cfg config.Config, snap *portmap.Snapshot) {
+	if snap.State != portmap.StateActive || cfg.PublicHost == "" {
+		return
+	}
+
+	_, port, err := net.SplitHostPort(cfg.PublicHost)
+	if err != nil {
+		return // 没写端口,那走的是 80,不参与这个判断
+	}
+	if port == strconv.Itoa(cfg.WebRTCPort) {
+		return
+	}
+
+	snap.Hint = fmt.Sprintf(
+		"公网地址里写的是 %s 端口,而自动映射开的是 %d —— 两者对不上,链接打不开。"+
+			"把公网地址改成 %s,或者清空它让程序自己填。",
+		port, cfg.WebRTCPort,
+		net.JoinHostPort(hostOnly(cfg.PublicHost), strconv.Itoa(cfg.WebRTCPort)))
+}
+
+// hostOnly 去掉主机串里的端口部分。
+func hostOnly(hostPort string) string {
+	if h, _, err := net.SplitHostPort(hostPort); err == nil {
+		return h
+	}
+	return hostPort
 }
 
 // handleConfig 读取或更新配置。
@@ -149,6 +205,16 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+
+		// 注意:这里**不**用"公网地址变了就是用户改的"来判断。
+		//
+		// 控制页每次保存都会把整个配置对象发回来,而自动映射可能刚在两次
+		// 轮询之间换了公网 IP —— 这时候页面手里还是旧值,值一变就被当成
+		// 用户改的,自动跟随会悄无声息地失效。
+		//
+		// 所以标记由前端在"用户真的动了那个输入框"时清掉(见 app.js),
+		// 后端原样采信。见 config.CanAutoSetPublicHost 与 ApplyAutoPublicHost。
+
 		if err := s.updateConfig(next); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error": err.Error(),
@@ -173,6 +239,19 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			needsRestart = true
 		}
 
+		if s.portMap != nil {
+			if old.AutoPortMap != updated.AutoPortMap {
+				// 后台协程去干活,不在这里等 —— 发现路由器要几秒,
+				// 用户不该为了勾一个复选框转圈
+				s.portMap.SetEnabled(updated.AutoPortMap)
+			}
+			// 端口改了必须跟着告知,否则映射还守着旧端口,而 MediaMTX
+			// 已经换到新端口上监听了
+			if old.WebRTCPort != updated.WebRTCPort || old.UDPPort != updated.UDPPort {
+				s.portMap.Configure(portmap.RulesFor(updated.WebRTCPort, updated.UDPPort), s.lanIP)
+			}
+		}
+
 		streamChanged := videoChanged(old.Video, updated.Video) ||
 			audioChanged(old.Audio, updated.Audio)
 		if streamChanged && s.stream.Status().Running {
@@ -192,6 +271,65 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+// ApplyAutoPublicHost 把自动映射拿到的公网地址写进配置并让它生效。
+//
+// 它和用户手动填地址走的是**同一条路**:PublicHost 变了就要重写 MediaMTX
+// 配置(webrtcAdditionalHosts)并重启它,否则浏览器拿到的 ICE 候选还是内网
+// 地址 —— 症状是页面能打开、播放器一直转圈,而看不出是哪儿不对。
+//
+// 由 portmap 的后台协程调用,所以这里可以放心做慢操作(重启 MediaMTX 要几秒)。
+func (s *Server) ApplyAutoPublicHost(externalIP string) {
+	if externalIP == "" {
+		return
+	}
+
+	old := s.currentConfig()
+	if !old.CanAutoSetPublicHost() {
+		// 用户自己填了地址(多半是 DDNS 域名)。他填那个是有意的 ——
+		// 域名不会变,而这台机器的公网 IP 会。
+		return
+	}
+
+	host := net.JoinHostPort(externalIP, strconv.Itoa(old.WebRTCPort))
+	if old.PublicHost == host && old.PublicHostAuto {
+		return // 没变,不必白重启一次 MediaMTX
+	}
+
+	next := old
+	next.PublicHost, next.PublicHostAuto = host, true
+
+	if err := s.updateConfig(next); err != nil {
+		log.Printf("自动映射:公网地址写入配置失败: %v", err)
+		return
+	}
+	log.Printf("自动映射:公网观看地址已更新为 %s", host)
+
+	if s.onTopo != nil {
+		if err := s.onTopo(next); err != nil {
+			log.Printf("自动映射:重建 MediaMTX 配置失败: %v", err)
+			return
+		}
+	}
+	// MediaMTX 一重起,ffmpeg 的推流连接就断了,得跟着重推
+	if s.stream.Status().Running {
+		s.stream.Restart()
+	}
+}
+
+// handlePortMapRetry 让用户手动触发一次重试,不必等退避时间走完。
+func (s *Server) handlePortMapRetry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.portMap == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "这一版没有自动端口映射"})
+		return
+	}
+	s.portMap.Retry()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // externalNote 在外部推流模式下统一解释为什么这些按钮不起作用。

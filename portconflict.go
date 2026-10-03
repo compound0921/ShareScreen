@@ -188,12 +188,21 @@ func resolveConflict(cfg *config.Config, c *portConflict, cfgPath string) (bool,
 	// 换端口要连带改路由器映射,那是只有用户能完成的一步,所以这里不替他决定,
 	// 只把该做什么说清楚。
 	if c.router {
+		// 开了自动映射也一样不换。
+		//
+		// 这条不变量不能建立在"UPnP 一定能成功"之上 —— 恰恰是路由器关 UPnP、
+		// CGNAT、映射失败这些场景,最需要守住"不悄悄把公网入口挪走"。
+		// 而且换端口会作废已经发出去的链接和二维码。
+		extra := ""
+		if cfg.AutoPortMap {
+			extra = "\n(自动端口映射开着也是一样 —— 换了公网链接就变了,已经发出去的链接会失效。)"
+		}
 		return false, fmt.Errorf(
 			"%s 的 %s 端口 %d 被 %s 占用。\n"+
 				"这个端口在路由器上做了映射,不能自动更换 —— 换了公网就断了。\n"+
 				"请先关掉占用它的程序;确实要换的话,改配置文件里的端口,"+
-				"并同步修改路由器的端口映射。",
-			c.label, c.proto(), c.port, c.ownerText())
+				"并同步修改路由器的端口映射。%s",
+			c.label, c.proto(), c.port, c.ownerText(), extra)
 	}
 
 	newPort := pickFreePort(c.port, c.udp)

@@ -85,6 +85,22 @@ type Config struct {
 	// 程序不负责打通公网,只负责把它拼成可点的链接。
 	PublicHost string `json:"publicHost,omitempty"`
 
+	// 当前的 PublicHost 是程序自动写入的(来自 UPnP 拿到的公网地址),
+	// 而不是用户手填或 DDNS。
+	//
+	// 它唯一的作用是决定 AutoPortMap 能不能覆盖 PublicHost:用户手填的值
+	// (比如一个 DDNS 域名)永远不该被程序改掉,而自动写入的值必须跟着
+	// 公网 IP 走 —— 家宽 IP 是会变的。
+	PublicHostAuto bool `json:"publicHostAuto,omitempty"`
+
+	// AutoPortMap 打开后由程序自己通过 UPnP 在路由器上建立端口映射,
+	// 不需要用户进路由器后台手动配。
+	//
+	// 默认关闭:开端口是对外动作,不该在用户没要求的时候做。而且大量路由器
+	// 关着 UPnP 或处于运营商级 NAT 之后,开了也可能用不了 —— 那种情况下
+	// 程序必须安静地退回手动模式,不能影响启动。
+	AutoPortMap bool `json:"autoPortMap,omitempty"`
+
 	ControlPort int    `json:"controlPort"`
 	RTSPPort    int    `json:"rtspPort"`
 	RTMPPort    int    `json:"rtmpPort"`
@@ -182,6 +198,11 @@ func (c *Config) Normalize() {
 	if c.StreamPath == "" {
 		c.StreamPath = d.StreamPath
 	}
+	// 没有公网地址就无所谓"是不是自动写的"。不归零的话,用户清空地址之后
+	// 这个标记会一直挂着,下次自动写入时看不出区别,但配置读起来是矛盾的。
+	if c.PublicHost == "" {
+		c.PublicHostAuto = false
+	}
 
 	switch c.Video.Encoder {
 	case "", "auto", "nvenc", "qsv", "amf", "x264":
@@ -189,6 +210,14 @@ func (c *Config) Normalize() {
 	default:
 		c.Video.Encoder = ""
 	}
+}
+
+// CanAutoSetPublicHost 报告自动端口映射能不能改写公网地址。
+//
+// 用户手填的地址(DDNS 域名之类)永远不动 —— 他填那个是有意的,程序拿到的
+// 公网 IP 反而会变。只有地址是空的、或者上一次就是程序自己写进去的,才可以改。
+func (c *Config) CanAutoSetPublicHost() bool {
+	return c.PublicHost == "" || c.PublicHostAuto
 }
 
 // Capacity 返回当前码率下能同时支撑的观众数。

@@ -24,6 +24,12 @@ const els = {
   encoder: $('encoder'),
   uplink: $('uplink'),
   publicHost: $('publicHost'),
+  autoPortMap: $('autoPortMap'),
+  portmapStatus: $('portmapStatus'),
+  portmapDot: $('portmapDot'),
+  portmapText: $('portmapText'),
+  portmapHint: $('portmapHint'),
+  portmapRetry: $('portmapRetry'),
   toggle: $('toggle'),
   restart: $('restart'),
   uptime: $('uptime'),
@@ -113,6 +119,8 @@ function renderForm() {
   els.encoder.value = v.encoder || '';
   els.uplink.value = String(config.uplinkMbps);
   els.publicHost.value = config.publicHost || '';
+  els.autoPortMap.checked = !!config.autoPortMap;
+  renderPortMap(null);
 
   const a = config.audio || {};
   const abr = a.bitrateKbps || 96;
@@ -416,6 +424,7 @@ async function saveConfig() {
     audio: collectAudio(),
     uplinkMbps: Number(els.uplink.value) || config.uplinkMbps,
     publicHost: els.publicHost.value.trim(),
+    autoPortMap: els.autoPortMap.checked,
   };
 
   try {
@@ -468,9 +477,63 @@ async function poll() {
     if (typeof res.viewers === 'number') status.viewers = res.viewers;
     if (typeof res.capacity === 'number') status.capacity = res.capacity;
     renderStatus();
+
+    if (res.portMap !== undefined) renderPortMap(res.portMap);
+
+    // 公网地址可能被自动映射换掉了(拿到的公网 IP 变了)。换了就得重渲染
+    // 观看链接,否则页面上挂的还是旧地址。
+    //
+    // 只在真的变了时才重渲染 —— 每 2 秒重建一次的话,二维码会一直闪。
+    if (res.publicHost !== undefined && config && res.publicHost !== config.publicHost) {
+      refreshWatchURLs();
+    }
   } catch {
     // 轮询失败不打断界面 —— 通常意味着程序正在退出
   }
+}
+
+// refreshWatchURLs 重新拉一次观看地址并渲染。
+async function refreshWatchURLs() {
+  try {
+    const s = await api('/api/state');
+    config.publicHost = s.config.publicHost || '';
+    config.publicHostAuto = !!s.config.publicHostAuto;
+    // 用户正在这个框里打字时不要回填,免得把他输的半个地址冲掉
+    if (document.activeElement !== els.publicHost) {
+      els.publicHost.value = config.publicHost;
+    }
+    renderWatchURLs(s.watchUrls);
+  } catch {
+    // 拉不到就维持现状,下次轮询还会再试
+  }
+}
+
+// renderPortMap 画自动端口映射的状态行。
+//
+// snap 为 null 表示还没拿到状态(刚加载完、或这一版没有这个能力),
+// 这时整块藏起来 —— 宁可不显示,也不要显示一个空的状态行。
+function renderPortMap(snap) {
+  if (!snap || snap.state === 'disabled') {
+    els.portmapStatus.hidden = true;
+    els.portmapHint.hidden = true;
+    els.portmapRetry.hidden = true;
+    return;
+  }
+
+  els.portmapStatus.hidden = false;
+  els.portmapText.textContent = snap.message || '';
+  els.portmapHint.textContent = snap.hint || '';
+  els.portmapHint.hidden = !snap.hint;
+
+  // 状态同时用颜色和文字表达,不靠颜色单独传达信息
+  els.portmapDot.className = 'pm-dot';
+  if (snap.state === 'active') {
+    els.portmapDot.classList.add('ok');
+  } else if (snap.state === 'failed') {
+    els.portmapDot.classList.add('bad');
+  }
+  // 只有失败时才给"重新检测"—— 进行中和成功都没有可点的东西
+  els.portmapRetry.hidden = snap.state !== 'failed';
 }
 
 // ── 启动 ──
@@ -528,7 +591,26 @@ async function init() {
 
   els.windowTitle.addEventListener('input', scheduleSave);
   els.uplink.addEventListener('input', scheduleSave);
-  els.publicHost.addEventListener('input', scheduleSave);
+  // 用户一动这个框,地址就归他管了 —— 自动映射从此不许再覆盖。
+  //
+  // 只在真的发生输入时清标记,而不是每次保存都清:保存会因为改别的字段
+  // (码率、帧率)被顺带触发,那种情况下地址根本没被碰过。
+  els.publicHost.addEventListener('input', () => {
+    config.publicHostAuto = false;
+    scheduleSave();
+  });
+
+  els.autoPortMap.addEventListener('change', scheduleSave);
+
+  els.portmapRetry.addEventListener('click', async () => {
+    els.portmapRetry.disabled = true;
+    try {
+      await api('/api/portmap/retry', { method: 'POST' });
+    } catch {
+      // 重试发不出去也无所谓,轮询会带来最新状态
+    }
+    setTimeout(() => { els.portmapRetry.disabled = false; }, 1000);
+  });
 
   els.toggle.addEventListener('click', toggleStream);
   els.restart.addEventListener('click', restartStream);
