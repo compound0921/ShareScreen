@@ -20,9 +20,19 @@ import (
 //
 // (见 cmd/link/internal/loadpe 里读加数的代码,以及 ld/pe.go 的 addpersrc。)
 //
-// 所以 PE 里那些必须是"映像内绝对地址"的字段 —— 资源目录的每个子目录指针、
-// 以及数据入口的 OffsetToData —— 只要在重定位处写**段内偏移**就够了,
-// 链接器会把段地址加上去。这就是下面 relocs 这个列表的含义。
+// 用重定位的时候要分清两类指针 —— 它们要的是不一样的地址,这一点踩过一次坑:
+//
+//   - 数据入口的 OffsetToData:**RVA**。要列进 relocs,让链接器把段地址加上去。
+//   - 资源目录条目的子目录/数据入口指针:**段内偏移**,不能重定位。
+//
+// 后者看着反直觉,但这是实测的结果:拿 notepad.exe、powershell_ise.exe 这些
+// 微软自己打的 PE 看,目录条目里存的都是 0x38 这种段内偏移,而数据入口里存的
+// 是 0x36710 这种 RVA。系统在映射映像时会给目录条目补上段地址,所以磁盘上
+// 存的必须是段内偏移。
+//
+// 两边都按 RVA 写(也就是给目录条目也列重定位)时,资源管理器不会报错,
+// 只是静默地拿默认图标顶上 —— exe 图标、SHGetFileInfo 全是通用的那个。
+// 但程序本身照跑不误,所以不看图标根本发现不了。
 
 const (
 	rtIcon      = 3  // RT_ICON:图标本体
@@ -116,7 +126,8 @@ func buildRsrcData(sizes []int) ([]byte, []int, error) {
 	putDirHeader := func(off, idEntries int) {
 		binary.LittleEndian.PutUint16(buf[off+14:], uint16(idEntries))
 	}
-	// 目录条目 = ID + 指向下一级的偏移。偏移是 RVA,要重定位。
+	// 目录条目 = ID + 指向下一级的偏移。偏移写**段内偏移**,不列重定位 ——
+	// 理由见文件头。
 	//
 	// 偏移字段的最高位是个标志位:置 1 表示"指向下一级目录",清 0 表示
 	// "指向数据入口"。少了它,系统会把这个子目录当成数据入口去解释,
@@ -129,9 +140,9 @@ func buildRsrcData(sizes []int) ([]byte, []int, error) {
 			v |= 0x80000000
 		}
 		binary.LittleEndian.PutUint32(buf[off+4:], v)
-		relocs = append(relocs, off+4)
 	}
-	// 数据入口:偏移 + 长度 + 代码页 + 保留。只有偏移是 RVA。
+	// 数据入口:偏移 + 长度 + 代码页 + 保留。只有偏移是 RVA,
+	// 所以这里写段内偏移并列出重定位,由链接器加上段地址。
 	putDataEntry := func(off, blobOff, size int) {
 		binary.LittleEndian.PutUint32(buf[off:], uint32(blobOff))
 		binary.LittleEndian.PutUint32(buf[off+4:], uint32(size))
