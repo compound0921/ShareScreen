@@ -618,4 +618,11 @@ async function init() {
   pollTimer = setInterval(poll, 2000);
 }
 
+// 挂一条一直开着的长连接,让服务器知道"控制页还开着"。
+//
+// 关掉页面时这条连接会断,服务器据此把整个程序退掉 —— 也就是说,关掉控制页
+// 就等于关掉程序。刷新会立刻重连,不会被误判;切到别的标签页、锁屏都不会断。
+// 见 internal/server/alive.go。
+new EventSource('/api/alive');
+
 init();

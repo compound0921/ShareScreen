@@ -47,6 +47,12 @@ type Server struct {
 
 	cfgMu sync.RWMutex
 	cfg   config.Config
+
+	// 控制页存活状态,见 alive.go。
+	onControlGone func()
+	aliveMu       sync.Mutex
+	aliveConns    int  // 当前开着的控制页数量
+	aliveSeen     bool // 是否曾经有控制页连上来过
 }
 
 type Options struct {
@@ -68,6 +74,11 @@ type Options struct {
 	// (webrtcAdditionalHosts),改了必须重写文件并重启它的进程,
 	// 否则界面上那个输入框就是个摆设。
 	OnTopologyChange func(config.Config) error
+
+	// OnControlPageGone 在控制页关闭后调用一次(判断方式见 alive.go)。
+	//
+	// nil 表示不启用:关掉浏览器,程序照常在托盘里待着。
+	OnControlPageGone func()
 }
 
 func New(o Options) *Server {
@@ -80,8 +91,9 @@ func New(o Options) *Server {
 		lanIP:    o.LANIP,
 		cfgPath:  o.ConfigPath,
 		cfg:      o.Config,
-		onTopo:   o.OnTopologyChange,
-		portMap:  o.PortMap,
+		onTopo:        o.OnTopologyChange,
+		portMap:       o.PortMap,
+		onControlGone: o.OnControlPageGone,
 	}
 	s.stream.SetConfig(o.Config)
 	s.stream.SetEncoders(o.Encoders)
@@ -96,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(static))))
 	mux.HandleFunc("/", s.handleIndex)
 
+	mux.HandleFunc("/api/alive", s.handleAlive)
 	mux.HandleFunc("/api/state", s.handleState)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/config", s.handleConfig)
@@ -117,6 +130,10 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 		Addr:              fmt.Sprintf("127.0.0.1:%d", port),
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	if s.onControlGone != nil {
+		go s.watchControlPage(ctx)
 	}
 
 	errCh := make(chan error, 1)

@@ -263,6 +263,11 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	})
 	defer mapper.Close()
 
+	// ctx 要在 server 之前建好 —— "控制页关了"这个信号也是靠取消它来收尾的,
+	// 而那个回调是在 server.New 时就装上去的。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	srv := server.New(server.Options{
 		Stream:           manager,
 		Runner:           runner,
@@ -274,6 +279,15 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		Config:           cfg,
 		PortMap:          mapper,
 		OnTopologyChange: restartMTX,
+
+		// 关掉控制页 = 关掉程序。
+		//
+		// 控制页是本机唯一的操作入口,页面关了还留着进程,用户会以为程序
+		// 已经退了,而 ffmpeg 还在采集、MediaMTX 还在对外服务。
+		OnControlPageGone: func() {
+			log.Printf("控制页已关闭,退出程序")
+			stop()
+		},
 	})
 
 	applyHost = srv.ApplyAutoPublicHost
@@ -281,9 +295,6 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		log.Printf("自动端口映射:已启用,正在查找路由器…")
 		mapper.SetEnabled(true)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() {
