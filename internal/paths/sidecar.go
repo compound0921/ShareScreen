@@ -8,10 +8,10 @@ import (
 	"strings"
 )
 
-// 侧载:从可执行文件旁边的 tools/ 目录查找。
+// 从可执行文件旁边的 tools/ 目录查找。
 //
-// 这是默认构建方式。二进制只有 8 MB、编译几秒完成,代价是分发时
-// 要连 tools/ 目录一起拷贝。
+// 发布件就是一个文件夹:ShareScreen.exe 和 tools/ 并排放着,解压出来
+// 保持原样即可。二进制本身只有 8 MB,两个组件在目录里看得见也换得掉。
 
 var (
 	sidecarFFmpeg   = filepath.Join("tools", "ffmpeg", "bin", "ffmpeg.exe")
@@ -39,7 +39,8 @@ func resolveSidecar(rel, name string) (*Tool, error) {
 
 	return nil, fmt.Errorf(
 		"找不到 %s。已尝试以下位置:\n  %s\n"+
-			"请确认 tools/ 目录与程序放在一起,或改用内嵌构建(go build -tags embed_tools)",
+			"请确认 tools/ 目录和 ShareScreen.exe 放在一起 —— "+
+			"发布包解压出来的文件夹要保持原样,别只把 exe 单独拷出来",
 		name, strings.Join(tried, "\n  "))
 }
 

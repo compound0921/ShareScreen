@@ -265,8 +265,9 @@ func waitPortFree(addr string, udp bool, timeout time.Duration) {
 // isOurProcess 判断占用端口的进程是不是自家程序。
 //
 // 认两条:进程名必须是 sharescreen / mediamtx / ffmpeg 三者之一,
-// 而且可执行文件得待在我们自己的目录树里 —— 自家 exe 所在目录(侧载版
-// 的 tools/ 就在里面),或者数据目录下(内嵌版把工具释放到那儿)。
+// 而且可执行文件得待在我们自己的目录树里 —— 自家 exe 所在目录(tools/
+// 就在里面),或者数据目录下(早期内嵌版会把工具释放到那儿,留下来的
+// 老进程也得认)。
 func isOurProcess(o netport.Owner) bool {
 	if o.Path == "" {
 		return false
