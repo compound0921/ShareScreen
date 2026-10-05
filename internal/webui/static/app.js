@@ -21,7 +21,7 @@ const els = {
   fps: $('fps'),
   bitrate: $('bitrate'),
   encoder: $('encoder'),
-  uplink: $('uplink'),
+  bitrateField: $('bitrateField'),
   publicHost: $('publicHost'),
   autoPortMap: $('autoPortMap'),
   portmapStatus: $('portmapStatus'),
@@ -33,8 +33,6 @@ const els = {
   restart: $('restart'),
   uptime: $('uptime'),
   viewers: $('viewers'),
-  capacityFill: $('capacityFill'),
-  capacityText: $('capacityText'),
   watchList: $('watchList'),
   qr: $('qr'),
   warnBox: $('warnBox'),
@@ -135,7 +133,6 @@ function renderForm() {
   els.fps.value = String(v.fps);
   els.bitrate.value = String(v.bitrateKbps);
   els.encoder.value = v.encoder || '';
-  els.uplink.value = String(config.uplinkMbps);
   els.publicHost.value = config.publicHost || '';
   els.autoPortMap.checked = !!config.autoPortMap;
   renderPortMap(null);
@@ -172,8 +169,12 @@ function renderSourceFields() {
   els.sourceHint.textContent = SOURCE_HINT[src] || '';
   els.windowField.hidden = src !== 'window';
   els.pushField.hidden = !external;
-  // 分辨率/帧率/编码器/音频在直推模式下都由 OBS 决定,留着只会误导
+  // 分辨率/帧率/编码器/音频/码率在直推模式下都由 OBS 决定,留着只会误导。
+  //
+  // 码率尤其要藏:直推时它一个字都传不到 ffmpeg(本程序根本不跑 ffmpeg),
+  // 只被拿去估算观众数 —— 摆在那里会让人以为调了有用。
   els.captureParams.hidden = external;
+  els.bitrateField.hidden = external;
   els.audioField.hidden = external;
 
   renderAudioFields();
@@ -358,27 +359,6 @@ function renderStatus() {
   const viewers = status.viewers;
   els.viewers.textContent = viewers < 0 ? '未知' : String(viewers);
 
-  // 容量
-  const capacity = status.capacity ?? 0;
-  let fillPct = 0;
-  if (capacity > 0 && viewers >= 0) {
-    fillPct = Math.min(100, (viewers / capacity) * 100);
-  }
-  els.capacityFill.style.width = fillPct + '%';
-
-  const over = capacity < 1 || (viewers >= 0 && viewers > capacity);
-  els.capacityFill.classList.toggle('over', over);
-
-  if (capacity < 1) {
-    els.capacityText.textContent = '当前码率超出上行带宽,无法推流';
-  } else if (viewers < 0) {
-    els.capacityText.textContent = `可支撑 ${capacity} 人(当前观众数未知)`;
-  } else if (over) {
-    els.capacityText.textContent = `已超出可支撑人数(${capacity} 人),所有人都会卡`;
-  } else {
-    els.capacityText.textContent = `可支撑 ${capacity} 人`;
-  }
-
   // 警告 —— 推流本身是好的,只是少了点东西(目前只有音频采集失败)。
   // 和下面的错误分开显示,免得用户以为整个共享挂了。
   if (status.warning) {
@@ -436,7 +416,10 @@ async function saveConfig() {
     ...config,
     video: collectVideo(),
     audio: collectAudio(),
-    uplinkMbps: Number(els.uplink.value) || config.uplinkMbps,
+    // 上行带宽已经没有输入框了,原样带回去 —— 配置里那个值还在被
+    // "可支撑观众数"用着,不能在这条路上被冲成 0(Normalize 会把它
+    // 换回默认的 10,于是用户看不见的设定被悄悄改掉)。
+    uplinkMbps: config.uplinkMbps,
     publicHost: els.publicHost.value.trim(),
     autoPortMap: els.autoPortMap.checked,
   };
@@ -448,7 +431,6 @@ async function saveConfig() {
       body: JSON.stringify(next),
     });
     config = res.config;
-    status.capacity = res.capacity;
     renderStatus();
     if (res.restarted) {
       els.badge.className = 'badge badge-busy';
@@ -489,7 +471,6 @@ async function poll() {
     const res = await api('/api/status');
     status = res.status || {};
     if (typeof res.viewers === 'number') status.viewers = res.viewers;
-    if (typeof res.capacity === 'number') status.capacity = res.capacity;
     renderStatus();
 
     if (res.portMap !== undefined) renderPortMap(res.portMap);
@@ -752,7 +733,6 @@ async function init() {
   encoders = state.encoders || [];
   status = state.status || {};
   status.viewers = state.viewers;
-  status.capacity = state.capacity;
 
   renderPresets();
   renderEncoders();
@@ -770,7 +750,7 @@ async function init() {
   });
 
   for (const el of [els.resolution, els.fps, els.bitrate, els.encoder,
-                    els.audioBitrate, els.uplink, els.publicHost]) {
+                    els.audioBitrate, els.publicHost]) {
     el.addEventListener('change', scheduleSave);
   }
 
@@ -790,7 +770,6 @@ async function init() {
   els.refreshWindows.addEventListener('click', loadWindows);
 
   els.windowTitle.addEventListener('input', scheduleSave);
-  els.uplink.addEventListener('input', scheduleSave);
   // 用户一动这个框,地址就归他管了 —— 自动映射从此不许再覆盖。
   //
   // 只在真的发生输入时清标记,而不是每次保存都清:保存会因为改别的字段

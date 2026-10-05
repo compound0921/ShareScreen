@@ -93,28 +93,19 @@
       <p class="hint">换耳机、切 HDMI 都会自动跟随。</p>
     </div>
 
-    <div class="row">
-      <div class="field">
-        <label for="bitrate">码率</label>
-        <select id="bitrate">
-          <option value="1000">1 Mbps</option>
-          <option value="1500">1.5 Mbps</option>
-          <option value="2000">2 Mbps</option>
-          <option value="3000">3 Mbps</option>
-          <option value="4000">4 Mbps</option>
-          <option value="6000">6 Mbps</option>
-          <option value="8000">8 Mbps</option>
-          <option value="12000">12 Mbps</option>
-        </select>
-      </div>
-
-      <div class="field">
-        <label for="uplink">上行带宽</label>
-        <div class="input-suffix">
-          <input type="number" id="uplink" min="1" max="1000" step="0.1">
-          <span>Mbps</span>
-        </div>
-      </div>
+    <!-- OBS 直推模式下由 OBS 决定码率,这个控件要藏起来(见 app.js) -->
+    <div class="field" id="bitrateField">
+      <label for="bitrate">码率</label>
+      <select id="bitrate">
+        <option value="1000">1 Mbps</option>
+        <option value="1500">1.5 Mbps</option>
+        <option value="2000">2 Mbps</option>
+        <option value="3000">3 Mbps</option>
+        <option value="4000">4 Mbps</option>
+        <option value="6000">6 Mbps</option>
+        <option value="8000">8 Mbps</option>
+        <option value="12000">12 Mbps</option>
+      </select>
     </div>
 
     <div class="field">
@@ -158,10 +149,6 @@
       <div class="stat-row">
         <span>当前观众</span>
         <strong id="viewers">—</strong>
-      </div>
-      <div class="capacity">
-        <div class="capacity-bar"><div id="capacityFill"></div></div>
-        <span id="capacityText" class="muted"></span>
       </div>
     </div>
 

@@ -122,6 +122,14 @@ func (s *Server) effectiveStatus(cfg config.Config) stream.Status {
 }
 
 // pushURLs 返回外部推流程序(OBS)要填的地址。
+//
+// 只给 WHIP。以前还列过一个 RTMP 地址作为兜底,去掉了:它**只有画面没有
+// 声音** —— RTMP 只能带 AAC,而浏览器的 WebRTC 只认 Opus,MediaMTX 又不
+// 转码(实测,见架构设计 §5.5)。一条注定没声音的地址摆在"推荐"下面,
+// 用户选了它然后来问为什么没声音,这个来回不值得。
+//
+// MediaMTX 那边的 RTMP 监听还开着(本机回环,不映射到公网),所以真要
+// 用 RTMP 的路子仍然通 —— 只是界面上不再引着人去用。
 func (s *Server) pushURLs(cfg config.Config) []pushURL {
 	return []pushURL{
 		{
@@ -129,12 +137,6 @@ func (s *Server) pushURLs(cfg config.Config) []pushURL {
 			URL:   fmt.Sprintf("http://127.0.0.1:%d/%s/whip", cfg.WebRTCPort, cfg.StreamPath),
 			Note:  "含音频,推荐。需要 OBS 29 或更高版本。",
 			Kind:  "whip",
-		},
-		{
-			Label: "RTMP",
-			URL:   fmt.Sprintf("rtmp://127.0.0.1:%d/%s", cfg.RTMPPort, cfg.StreamPath),
-			Note:  "**只有画面,没有声音。** RTMP 传的是 AAC,而浏览器的 WebRTC 不支持 AAC,MediaMTX 也不做转码(实测)。仅在 WHIP 不可用时使用。",
-			Kind:  "rtmp",
 		},
 	}
 }
