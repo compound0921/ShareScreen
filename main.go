@@ -26,6 +26,7 @@ import (
 	"sharescreen/internal/clipboard"
 	"sharescreen/internal/config"
 	"sharescreen/internal/ffmpeg"
+	"sharescreen/internal/gpu"
 	"sharescreen/internal/mediamtx"
 	"sharescreen/internal/paths"
 	"sharescreen/internal/portmap"
@@ -105,11 +106,39 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	}
 
 	// ── 探测本机能力 ──
+	//
+	// 分两步:先问 ffmpeg 构建里有哪些编码器(快,但那只说明编译进去了),
+	// 再让每个候选真编一帧,把跑不起来的剔掉(慢约一秒,但那是"能用"
+	// 的唯一依据 —— 实测没有 A 卡的机器上 h264_amf 照样在构建列表里)。
 	encoders, err := ffmpeg.ProbeEncoders(ffmpegTool.Exe)
 	if err != nil {
 		log.Printf("警告: 编码器探测失败: %v", err)
 	} else {
-		log.Printf("可用编码器: %s", encoderNames(encoders))
+		usable := ffmpeg.ProbeUsable(ffmpegTool.Exe, encoders)
+		log.Printf("编码器: %s", encoderNames(encoders))
+		if dropped := droppedNames(encoders, usable); dropped != "" {
+			log.Printf("其中跑不起来的已剔除: %s", dropped)
+		}
+		encoders = usable
+	}
+
+	// 显示器挂在哪块显卡上 —— 决定编码器优先选谁。
+	//
+	// ddagrab 抓的是驱动显示器那块 GPU 的画面,编码若落在另一块卡上,
+	// 帧要跨 PCIe 走一趟(架构设计 §5.4)。识不出来就是"未知",排序退回
+	// 原本的优先级,不影响启动。
+	adapterVendor := gpu.PrimaryVendor()
+	if list := gpu.Adapters(); len(list) > 0 {
+		log.Printf("显示器所属显卡: %s", adapterVendor)
+		for _, a := range list {
+			mark := ""
+			if a.Primary {
+				mark = "(主显示)"
+			} else if a.Attached {
+				mark = "(接了显示器)"
+			}
+			log.Printf("  %s [%s]%s", a.Name, a.Vendor, mark)
+		}
 	}
 
 	desktopW, desktopH := screen.Size()
@@ -118,10 +147,11 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 
 	// ── -print-args:只打印命令,不启动任何东西 ──
 	if printArgs {
-		enc, err := ffmpeg.ResolveEncoder(cfg.Video.Encoder, encoders)
-		if err != nil {
-			return err
+		plan := ffmpeg.Plan(cfg.Video.Encoder, encoders, adapterVendor)
+		if len(plan) == 0 {
+			return fmt.Errorf("没有可用的编码器")
 		}
+		enc := plan[0]
 		target := fmt.Sprintf("rtsp://127.0.0.1:%d/%s", cfg.RTSPPort, cfg.StreamPath)
 
 		// 干跑:不去真打开音频设备,用占位参数把音频那一段也打印出来,
@@ -197,6 +227,7 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		return err
 	}
 	manager.SetScreenSize(desktopW, desktopH)
+	manager.SetPreferredVendor(adapterVendor)
 	defer manager.Close()
 
 	// ── 控制页服务 ──
@@ -474,6 +505,24 @@ func publicHosts(cfg config.Config) []string {
 		return nil
 	}
 	return []string{host}
+}
+
+// droppedNames 返回 after 里没有而 before 里有的编码器名,逗号分隔。
+//
+// 只为了日志:用户看到"可用编码器少了 amf"时,能立刻知道是启动探测
+// 把它剔掉了,而不是别的地方出了问题。
+func droppedNames(before, after []ffmpeg.Encoder) string {
+	kept := map[string]bool{}
+	for _, e := range after {
+		kept[e.Name] = true
+	}
+	var out []string
+	for _, e := range before {
+		if !kept[e.Name] {
+			out = append(out, e.Name)
+		}
+	}
+	return strings.Join(out, ", ")
 }
 
 func encoderNames(list []ffmpeg.Encoder) string {

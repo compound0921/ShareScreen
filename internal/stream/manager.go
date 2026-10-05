@@ -8,6 +8,7 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"sharescreen/internal/audio"
 	"sharescreen/internal/config"
 	"sharescreen/internal/ffmpeg"
+	"sharescreen/internal/gpu"
 	"sharescreen/internal/paths"
 	"sharescreen/internal/proc"
 )
@@ -29,7 +31,15 @@ const (
 	// 启动后等多久做健康检查 —— 启动期的错误(填错窗口标题、编码器不可用)
 	// 会在这段时间内让进程退出。
 	healthDelay = 1500 * time.Millisecond
-	// 启动失败后的重试次数与退避基数。
+	// healthCheck 的轮询粒度。
+	//
+	// 健康检查不再无条件睡满 healthDelay,而是按这个间隔看进程还在不在。
+	// 编码器打不开时 ffmpeg 几十毫秒就退出了(实测 h264_amf 缺 DLL 时
+	// 32 毫秒),干等那 1.5 秒是纯浪费 —— 而回退会连着试好几个候选,
+	// 这个等待会一次次叠加。
+	healthPoll = 50 * time.Millisecond
+	// 启动失败后的重试次数与退避基数。这是**同一个编码器**的重试次数;
+	// 换下一个编码器是另一层(见 runStart)。
 	startRetries = 2
 	retryBackoff = 600 * time.Millisecond
 )
@@ -57,6 +67,11 @@ type Status struct {
 	TargetKbps  int      `json:"targetKbps"`
 	EncoderName string   `json:"encoderName,omitempty"`
 
+	// EncoderFallback 非空表示这次用上了回退:首选的那个编码器起不来,
+	// 已经自动换成了 EncoderName 里的这个。值是**首选**的短名,用来告诉
+	// 用户"你选的那个没跑起来"。
+	EncoderFallback string `json:"encoderFallback,omitempty"`
+
 	// External 为真表示流是外部程序推过来的(OBS 直推),本程序没有
 	// 运行 ffmpeg。界面据此换一套文案,并且不显示 ffmpeg 的输出尾部。
 	External bool `json:"external"`
@@ -79,12 +94,17 @@ type Manager struct {
 	// 不该走 hwdownload,否则白白丢掉零拷贝。0 表示未知。
 	screenW, screenH int
 
-	state       State
-	child       *proc.Child
-	startedAt   time.Time
-	lastErr     string
-	lastCommand string
-	encoderName string
+	// prefVendor 是驱动显示器那块显卡的厂商,用来给编码器排序。识不出来
+	// 就是 Unknown,排序退回原来的优先级。
+	prefVendor gpu.Vendor
+
+	state           State
+	child           *proc.Child
+	startedAt       time.Time
+	lastErr         string
+	lastCommand     string
+	encoderName     string
+	encoderFallback string
 
 	// 音频采集的一整套资源。它们的生命周期必须一起管:Capture 是 COM
 	// 设备对象,listener/conn 是把 PCM 送进 ffmpeg 的数据通路。
@@ -156,12 +176,13 @@ func (m *Manager) Status() Status {
 	defer m.stMu.RUnlock()
 
 	st := Status{
-		State:       m.state,
-		LastError:   m.lastErr,
-		Warning:     m.lastWarning,
-		Command:     m.lastCommand,
-		TargetKbps:  m.cfg.Video.BitrateKbps,
-		EncoderName: m.encoderName,
+		State:           m.state,
+		LastError:       m.lastErr,
+		Warning:         m.lastWarning,
+		Command:         m.lastCommand,
+		TargetKbps:      m.cfg.Video.BitrateKbps,
+		EncoderName:     m.encoderName,
+		EncoderFallback: m.encoderFallback,
 	}
 	if m.child != nil {
 		st.Running = m.child.Running()
@@ -183,27 +204,135 @@ func (m *Manager) Start() {
 			return // 已有一次启动在进行中
 		}
 		m.setState(StateStarting)
-		m.ensureClean() // 先确保没有残留的采集会话
+		m.runStart()
+	}()
+}
 
-		var lastErr error
-		for attempt := 0; attempt <= startRetries; attempt++ {
-			if attempt > 0 {
-				time.Sleep(retryBackoff * time.Duration(attempt))
-				m.ensureClean()
-			}
-			if err := m.startOnce(); err != nil {
-				lastErr = err
-				continue
-			}
-			if err := m.healthCheck(); err != nil {
-				lastErr = err
-				continue
+// SetPreferredVendor 告诉管理器显示器挂在哪个厂商的显卡上。
+//
+// 只影响候选排序(同厂商优先),拿不到就传 gpu.VendorUnknown。
+func (m *Manager) SetPreferredVendor(v gpu.Vendor) {
+	m.stMu.Lock()
+	m.prefVendor = v
+	m.stMu.Unlock()
+}
+
+// errEncoderUnavailable 表示"这个编码器在本机打不开",应当换下一个候选。
+//
+// 用它把两类失败分开:
+//
+//	编码器打不开      → 换下一个候选(重试同一个没意义,它不会自己好)
+//	其余(窗口标题写错、采集源不可用、推流地址连不上)→ 换成别的编码器
+//	                   也一样,原地重试才是对的
+//
+// 这个区分不是锦上添花:少了它,一个"窗口标题写错"的失败会被三个候选
+// 各重试三次,失败时间凭空乘三(实测从 6 秒变成 15 秒)。
+var errEncoderUnavailable = errors.New("编码器在本机不可用")
+
+// runStart 是 Start / Restart 共用的启动主体。
+//
+// 调用者必须已经持有 opMu 并置好 StateStarting。
+//
+// 这里是回退发生的地方:按候选列表逐个试,某个编码器起不来就换下一个。
+// 以前是"同一个编码器重试三次"—— 那对确定性的失败(卡不对、驱动没装)
+// 毫无用处,只是把同样的错误重放三遍。
+func (m *Manager) runStart() {
+	cands := m.candidates()
+	if len(cands) == 0 {
+		// 外部推流模式(OBS 直推):本程序不跑 ffmpeg,没有什么要启动的。
+		//
+		// 这个早退必须放在这里,而不是留在 startOnce 里 —— 那样
+		// startOnce 会返回 nil 却没设 m.child,紧接着的 healthCheck
+		// 会报"没有子进程"并白跑满三次重试。
+		m.markRunning()
+		return
+	}
+
+	m.ensureClean()   // 先确保没有残留的采集会话
+	m.setFallback("") // 清掉上一次的回退记录,这次从头算
+
+	m.stMu.RLock()
+	want := m.cfg.Video.Encoder
+	m.stMu.RUnlock()
+
+	var lastErr error
+	for i, enc := range cands {
+		if i > 0 {
+			m.ensureClean()
+		}
+		err := m.tryEncoder(enc)
+		if err == nil {
+			// 最终用的不是用户指定的那个,就算发生过回退。
+			//
+			// 两条路都会走到这里:用户选的那个在启动探测里就被剔掉了
+			// (比如在 N 卡机器上选了 amf),或者试了但起不来。
+			// 两种都要说 —— 否则用户的选择被静默忽略,界面上的
+			// 「编码器」显示着另一个名字,他不知道为什么。
+			if want != "" && want != "auto" && enc.Kind != want {
+				m.setFallback(want)
 			}
 			m.markRunning()
 			return
 		}
-		m.markFailed(lastErr)
-	}()
+		lastErr = err
+		// 和编码器无关的失败,换成别的编码器也一样 —— 立刻收手,
+		// 别把同一个错误按候选数重放几遍。
+		if !errors.Is(err, errEncoderUnavailable) {
+			break
+		}
+	}
+	m.markFailed(lastErr)
+}
+
+// tryEncoder 用一个编码器反复尝试,直到成功或者判定它没救。
+//
+// 返回值里有 errEncoderUnavailable 就表示"换下一个候选";否则调用方
+// 应当直接收手 —— 那种失败和编码器无关。
+func (m *Manager) tryEncoder(enc ffmpeg.Encoder) error {
+	var lastErr error
+	for attempt := 0; attempt <= startRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(retryBackoff * time.Duration(attempt))
+			m.ensureClean()
+		}
+
+		// startOnce 失败是进程都没起来(可执行文件找不到之类),
+		// 换编码器也一样,所以直接交给外层。
+		if err := m.startOnce(enc); err != nil {
+			return err
+		}
+
+		err := m.healthCheck()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		// 编码器打不开:不重试,立刻让外层换下一个。
+		// 实测失败只要几十毫秒(缺 DLL 时 32ms),重试纯属浪费。
+		if ffmpeg.EncoderUnavailable(err.Error()) {
+			return fmt.Errorf("%w(%s): %w", errEncoderUnavailable, enc.Name, err)
+		}
+	}
+	return lastErr
+}
+
+// candidates 返回按"先试哪个"排好的编码器列表。
+func (m *Manager) candidates() []ffmpeg.Encoder {
+	m.stMu.RLock()
+	cfg, encoders, vendor := m.cfg, m.encoders, m.prefVendor
+	m.stMu.RUnlock()
+
+	if cfg.Video.External() {
+		return nil
+	}
+	return ffmpeg.Plan(cfg.Video.Encoder, encoders, vendor)
+}
+
+func (m *Manager) setFallback(fromKind string) {
+	m.stMu.Lock()
+	m.encoderFallback = fromKind
+	m.stMu.Unlock()
 }
 
 // Stop 异步停止推流。
@@ -224,26 +353,7 @@ func (m *Manager) Restart() {
 		defer m.opMu.Unlock()
 
 		m.setState(StateStarting)
-		m.ensureClean()
-
-		var lastErr error
-		for attempt := 0; attempt <= startRetries; attempt++ {
-			if attempt > 0 {
-				time.Sleep(retryBackoff * time.Duration(attempt))
-				m.ensureClean()
-			}
-			if err := m.startOnce(); err != nil {
-				lastErr = err
-				continue
-			}
-			if err := m.healthCheck(); err != nil {
-				lastErr = err
-				continue
-			}
-			m.markRunning()
-			return
-		}
-		m.markFailed(lastErr)
+		m.runStart()
 	}()
 }
 
@@ -258,25 +368,15 @@ func (m *Manager) Close() {
 
 // ---------- 内部实现 ----------
 
-// startOnce 启动一次 ffmpeg。调用前必须已经确保环境干净。
-func (m *Manager) startOnce() error {
+// startOnce 用指定的编码器启动一次 ffmpeg。调用前必须已经确保环境干净。
+//
+// 编码器由调用方给(而不是在这里从配置解析),回退才有地方换 ——
+// 以前这里自己解析,拿到什么就是什么,失败也没得改。
+func (m *Manager) startOnce(enc ffmpeg.Encoder) error {
 	m.stMu.RLock()
 	cfg := m.cfg
-	encoders := m.encoders
 	screenW, screenH := m.screenW, m.screenH
 	m.stMu.RUnlock()
-
-	// 外部推流模式(OBS 直推)下本程序不该启动 ffmpeg ——
-	// 流是 OBS 直接推给 MediaMTX 的。放在这里而不是各调用点,
-	// 是因为 Restart() 会在公网地址变化时被调到,那条路径容易漏。
-	if cfg.Video.External() {
-		return nil
-	}
-
-	enc, err := ffmpeg.ResolveEncoder(cfg.Video.Encoder, encoders)
-	if err != nil {
-		return err
-	}
 
 	// 音频必须在 ffmpeg 之前准备好:它决定了 ffmpeg 的音频输入参数
 	// (采样格式、采样率、声道数都来自设备的混音格式)。
@@ -319,27 +419,39 @@ func (m *Manager) startOnce() error {
 	return nil
 }
 
-// healthCheck 等待一小段时间,确认 ffmpeg 没有立刻退出。
+// healthCheck 等一小段时间,确认 ffmpeg 没有立刻退出。
+//
+// 判定标准还是"活满 healthDelay",但过程改成轮询:**进程一退出就返回,
+// 不等满**。编码器打不开时 ffmpeg 几十毫秒就走了(实测 h264_amf 缺 DLL
+// 时 32 毫秒),干等 1.5 秒纯属浪费 —— 而回退会连着试好几个候选,
+// 这个等待会一次次叠加。
+//
+// 成功路径仍然等满 healthDelay:那是用来兜"起来之后又慢死"的,
+// 缩短它会把偶发失败误判成成功。
 func (m *Manager) healthCheck() error {
-	time.Sleep(healthDelay)
+	deadline := time.Now().Add(healthDelay)
 
-	m.stMu.RLock()
-	child := m.child
-	m.stMu.RUnlock()
+	for {
+		m.stMu.RLock()
+		child := m.child
+		m.stMu.RUnlock()
 
-	if child == nil {
-		return fmt.Errorf("内部错误:健康检查时没有子进程")
+		if child == nil {
+			return fmt.Errorf("内部错误:健康检查时没有子进程")
+		}
+		if !child.Running() {
+			tail := child.TailText(15)
+			err := child.ExitErr()
+			if tail == "" {
+				return fmt.Errorf("ffmpeg 启动后立即退出: %v", err)
+			}
+			return fmt.Errorf("ffmpeg 启动后立即退出: %v\n%s", err, tail)
+		}
+		if !time.Now().Before(deadline) {
+			return nil
+		}
+		time.Sleep(healthPoll)
 	}
-	if child.Running() {
-		return nil
-	}
-
-	tail := child.TailText(15)
-	err := child.ExitErr()
-	if tail == "" {
-		return fmt.Errorf("ffmpeg 启动后立即退出: %v", err)
-	}
-	return fmt.Errorf("ffmpeg 启动后立即退出: %v\n%s", err, tail)
 }
 
 // ensureClean 彻底停止当前子进程,并确认系统资源已释放。

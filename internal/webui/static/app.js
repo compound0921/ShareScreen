@@ -33,6 +33,9 @@ const els = {
   restart: $('restart'),
   uptime: $('uptime'),
   viewers: $('viewers'),
+  encoderRow: $('encoderRow'),
+  encoderText: $('encoderText'),
+  encoderFallback: $('encoderFallback'),
   watchList: $('watchList'),
   qr: $('qr'),
   warnBox: $('warnBox'),
@@ -114,13 +117,29 @@ function renderEncoders() {
   els.encoder.innerHTML = '';
   const auto = document.createElement('option');
   auto.value = '';
-  auto.textContent = '自动(优先硬件)';
+  auto.textContent = '自动(按显示器所属显卡优先)';
   els.encoder.appendChild(auto);
 
+  const kinds = new Set();
   for (const e of encoders) {
+    kinds.add(e.kind);
     const opt = document.createElement('option');
     opt.value = e.kind;
     opt.textContent = e.label;
+    els.encoder.appendChild(opt);
+  }
+
+  // 配置里存着一个本机没有的编码器 —— 换机器带过来的,或者驱动坏了被
+  // 启动探测剔掉的。补一个条目把它显示出来。
+  //
+  // 不补的话,后面 renderForm 往里塞的值找不到匹配项,下拉框显示成空白:
+  // 用户盯着一个空框,既不知道原来选的是什么,也不知道为什么没生效。
+  // 实际跑的是哪一个,右栏「编码器」那一行会说明。
+  const saved = (config && config.video && config.video.encoder) || '';
+  if (saved && saved !== 'auto' && !kinds.has(saved)) {
+    const opt = document.createElement('option');
+    opt.value = saved;
+    opt.textContent = saved + '(本机不可用)';
     els.encoder.appendChild(opt);
   }
 }
@@ -358,6 +377,20 @@ function renderStatus() {
   // 观众数
   const viewers = status.viewers;
   els.viewers.textContent = viewers < 0 ? '未知' : String(viewers);
+
+  // 实际用的编码器。API 里一直有这个字段,只是以前前端没渲染。
+  const encName = status.encoderName || '';
+  els.encoderRow.hidden = !encName;
+  els.encoderText.textContent = encName || '—';
+
+  // 发生过回退就明说。回退本身是好事(不然直接推不了流),但静默地换掉
+  // 用户指定的编码器会让人以为"我明明选了 amf,怎么在跑 x264"。
+  const fbFrom = status.encoderFallback || '';
+  els.encoderFallback.hidden = !fbFrom;
+  if (fbFrom) {
+    els.encoderFallback.textContent =
+      `首选 ${fbFrom} 在本机起不来,已自动改用 ${encName}。`;
+  }
 
   // 警告 —— 推流本身是好的,只是少了点东西(目前只有音频采集失败)。
   // 和下面的错误分开显示,免得用户以为整个共享挂了。

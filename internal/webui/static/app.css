@@ -428,3 +428,10 @@ button.danger {
   color: var(--danger);
 }
 button.danger:hover { background: var(--danger); color: #fff; }
+
+/* 编码器名是一串标识符(h264_nvenc),不像观众数那样是个大数字 ——
+   沿用 .stat-row strong 那套 20px 会把它撑得喧宾夺主。 */
+#encoderRow strong {
+  font-size: 13px;
+  font-weight: 600;
+}
