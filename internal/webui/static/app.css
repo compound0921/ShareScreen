@@ -318,16 +318,6 @@ button.ghost:hover:not(:disabled) { border-color: var(--text-dim); }
   color: var(--text-dim);
 }
 
-.qr-wrap { text-align: center; padding: 12px 0 0; }
-.qr-wrap img {
-  width: 168px;
-  height: 168px;
-  image-rendering: pixelated;
-  background: #fff;
-  padding: 8px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-}
 
 /* ── 错误 / 命令 ── */
 .error-box {

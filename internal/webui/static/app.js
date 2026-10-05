@@ -37,7 +37,6 @@ const els = {
   encoderText: $('encoderText'),
   encoderFallback: $('encoderFallback'),
   watchList: $('watchList'),
-  qr: $('qr'),
   warnBox: $('warnBox'),
   warnText: $('warnText'),
   errorBox: $('errorBox'),
@@ -52,7 +51,6 @@ const els = {
   rcClipboard: $('rcClipboard'),
   rcLinks: $('rcLinks'),
   rcLinkList: $('rcLinkList'),
-  rcQr: $('rcQr'),
   rcPending: $('rcPending'),
   rcPendingFrom: $('rcPendingFrom'),
   rcApprove: $('rcApprove'),
@@ -299,7 +297,6 @@ function renderWatchURLs(urls) {
   els.watchList.innerHTML = '';
   if (!urls || urls.length === 0) {
     els.watchList.innerHTML = '<p class="hint">暂无可用地址</p>';
-    els.qr.hidden = true;
     return;
   }
 
@@ -333,12 +330,6 @@ function renderWatchURLs(urls) {
     row.append(kind, a, btn);
     els.watchList.appendChild(row);
   }
-
-  // 二维码指向公网地址(如果配了),否则用局域网地址。
-  // 手机扫码走公网,所以优先。
-  const preferred = urls.find((u) => u.kind === 'public') || urls[0];
-  els.qr.src = '/api/qr.png?t=' + encodeURIComponent(preferred.url);
-  els.qr.hidden = false;
 }
 
 function renderStatus() {
@@ -517,7 +508,8 @@ async function poll() {
     // 公网地址可能被自动映射换掉了(拿到的公网 IP 变了)。换了就得重渲染
     // 观看链接,否则页面上挂的还是旧地址。
     //
-    // 只在真的变了时才重渲染 —— 每 2 秒重建一次的话,二维码会一直闪。
+    // 只在真的变了时才重渲染 —— 每 2 秒把列表重建一遍,正在点的那行
+    // 会被换掉,复制按钮点不动。
     if (res.publicHost !== undefined && config && res.publicHost !== config.publicHost) {
       refreshWatchURLs();
     }
@@ -530,7 +522,7 @@ async function poll() {
 
 // rcLinkKey 记住上一次渲染可控制链接用的"凭据+端口"组合。
 //
-// poll 每两秒跑一次,不加这个判断就会每两秒重建一次链接列表和二维码,
+// poll 每两秒跑一次,不加这个判断就会每两秒重建一次链接列表,
 // 页面看上去一直在闪。
 let rcLinkKey = '';
 
@@ -613,7 +605,6 @@ function renderRCLinks(links) {
 
   if (!links.length) {
     els.rcLinkList.innerHTML = '<p class="hint">还没有可用的地址</p>';
-    els.rcQr.hidden = true;
     return;
   }
 
@@ -646,10 +637,6 @@ function renderRCLinks(links) {
     row.append(kind, text, btn);
     els.rcLinkList.appendChild(row);
   }
-
-  const preferred = links.find((u) => u.kind === 'public') || links[0];
-  els.rcQr.src = '/api/qr.png?t=' + encodeURIComponent(preferred.url);
-  els.rcQr.hidden = false;
 }
 
 function initRemoteControl() {

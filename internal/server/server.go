@@ -142,7 +142,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/restart", s.handleRestart)
 	mux.HandleFunc("/api/presets", s.handlePresets)
 	mux.HandleFunc("/api/encoders", s.handleEncoders)
-	mux.HandleFunc("/api/qr.png", s.handleQR)
 	mux.HandleFunc("/api/windows", s.handleWindows)
 	mux.HandleFunc("/api/portmap/retry", s.handlePortMapRetry)
 

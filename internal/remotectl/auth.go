@@ -19,8 +19,8 @@ func NewToken() (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	// URL 安全的 base64 且不带填充:令牌要出现在链接里,而 # 和 =
-	// 在复制粘贴、二维码里都是麻烦。
+	// URL 安全的 base64 且不带填充:令牌要出现在链接的 # 片段里,
+	// 而 # 和 = 在复制粘贴时会添麻烦。
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
