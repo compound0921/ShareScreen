@@ -19,14 +19,17 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"sharescreen/internal/clipboard"
 	"sharescreen/internal/config"
 	"sharescreen/internal/ffmpeg"
 	"sharescreen/internal/mediamtx"
 	"sharescreen/internal/paths"
 	"sharescreen/internal/portmap"
+	"sharescreen/internal/remotectl"
 	"sharescreen/internal/screen"
 	"sharescreen/internal/server"
 	"sharescreen/internal/stream"
@@ -199,6 +202,36 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	// ── 控制页服务 ──
 	ip := lanIP()
 
+	// ── 远程控制 ──
+	//
+	// 默认不开启,也不监听任何端口。开启时才会绑 0.0.0.0 —— 这一步会
+	// 触发 Windows 防火墙的授权弹窗,所以它必须由用户主动点。
+	//
+	// CaptureRect 是现读的:采集源可能在控制页被改成窗口采集,那时候
+	// 屏幕坐标就对不上了,远控得跟着失效。
+	//
+	// trayReady 挡的是"托盘还没起来就调 SetStatus" —— systray 会把那次
+	// 调用丢掉并往日志里写一行错误,而那是我们自己制造的噪音。
+	var trayReady atomic.Bool
+
+	remote := remotectl.New(remotectl.Options{
+		WebRTCPort: cfg.WebRTCPort,
+		StreamPath: cfg.StreamPath,
+		Clipboard:  clipboard.New(),
+		CaptureRect: func() (screen.Rect, bool) {
+			return ffmpeg.CaptureRect(manager.Config().Video)
+		},
+		OnChange: func(st remotectl.Status) {
+			// 托盘提示里体现"有人正在控制",这是主人不在屏幕前时
+			// 唯一的可见线索。
+			if trayReady.Load() {
+				tray.SetStatus(remoteStatusText(st))
+			}
+		},
+	})
+	defer remote.Close()
+	remote.Configure(cfg.RemoteControl.Port, cfg.RemoteControl.Token, cfg.RemoteControl.AllowClipboard)
+
 	// topoMu 串行化重建 MediaMTX。
 	//
 	// 有两条路会在任意时刻触发它:用户在控制页改公网地址(HTTP 处理器),
@@ -258,7 +291,7 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	var applyHost func(string)
 	mapper := portmap.New(portmap.Options{
 		InternalIP: ip,
-		Rules:      portmap.RulesFor(cfg.WebRTCPort, cfg.UDPPort),
+		Rules:      portmap.RulesForWithControl(cfg.WebRTCPort, cfg.UDPPort, remoteControlPort(cfg)),
 		OnChange:   func(externalIP string) { applyHost(externalIP) },
 	})
 	defer mapper.Close()
@@ -278,15 +311,27 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		ConfigPath:       cfgPath,
 		Config:           cfg,
 		PortMap:          mapper,
+		RemoteControl:    remote,
 		OnTopologyChange: restartMTX,
 
 		// 关掉控制页 = 关掉程序。
 		//
 		// 控制页是本机唯一的操作入口,页面关了还留着进程,用户会以为程序
 		// 已经退了,而 ffmpeg 还在采集、MediaMTX 还在对外服务。
-		OnControlPageGone: func() {
+		//
+		// 远程控制是唯一的例外:它的典型用法恰恰是人不在电脑前,浏览器
+		// 标签崩掉或者被误关会把整个程序连带杀掉 —— 而那个时候你没法
+		// 重启它。所以远控开着的时候,关页只关页;要退出走托盘菜单。
+		OnControlPageGone: func() bool {
+			if remote.Status().Enabled {
+				log.Printf("控制页已关闭;远程控制开着,程序继续在托盘运行")
+				// true = 继续盯着:用户之后可能关掉远控再关页,
+				// 那时候就该正常退出了。
+				return true
+			}
 			log.Printf("控制页已关闭,退出程序")
 			stop()
+			return false
 		},
 	})
 
@@ -294,6 +339,17 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	if cfg.AutoPortMap {
 		log.Printf("自动端口映射:已启用,正在查找路由器…")
 		mapper.SetEnabled(true)
+	}
+
+	// 上次退出时远控是开着的,这次接着开。
+	//
+	// 失败不阻断启动:端口被占、采集源换成了窗口采集,都只意味着这一次
+	// 没开成,控制页上会显示原因。为了一个可选的对外功能起不来整个程序
+	// 是本末倒置。
+	if cfg.RemoteControl.Enabled {
+		if err := remote.SetEnabled(true); err != nil {
+			log.Printf("远程控制未能开启: %v", err)
+		}
 	}
 
 	errCh := make(chan error, 1)
@@ -322,6 +378,29 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 				Quit: func() {
 					log.Printf("收到托盘退出请求")
 					stop() // 取消 ctx,走正常收尾流程
+				},
+
+				// 远控的开关状态由 remotectl 持有,托盘只读它、不自己记 ——
+				// 控制页那边也能开关,两处各记一份必然会走散。
+				RemoteControlOn: func() bool { return remote.Status().Enabled },
+				ToggleRemoteControl: func(on bool) bool {
+					// 走控制页的同一段逻辑:写配置、开监听、同步路由器映射
+					// 是一件事的三个面,分开做迟早会落下其中一个。
+					if err := srv.SetRemoteControlEnabled(on); err != nil {
+						log.Printf("远程控制:开关失败: %v", err)
+						return false
+					}
+					return true
+				},
+				// 不依赖浏览器页面的那个刹车:页面卡住、断网、打不开的时候,
+				// 主人仍然要能把对方踢开。
+				RevokeControl: remote.Revoke,
+
+				// 托盘就绪之后才允许更新提示文字,顺便把当前状态补上 ——
+				// 之前那几次状态变化都发生在就绪之前,被挡掉了。
+				OnReady: func() {
+					trayReady.Store(true)
+					tray.SetStatus(remoteStatusText(remote.Status()))
 				},
 			})
 		}()
@@ -417,6 +496,34 @@ func joinTail(lines []string) string {
 		out += l + "\n"
 	}
 	return out
+}
+
+// remoteStatusText 把远控状态翻译成托盘提示里的一句话。
+//
+// 悬停托盘图标是主人不在屏幕前时唯一能看到的状态显示,所以"有人正在控制"
+// 这件事必须体现在这里,而不是只在浏览器页面上。
+func remoteStatusText(st remotectl.Status) string {
+	switch {
+	case !st.Enabled:
+		return "远程控制已关闭"
+	case st.Pending != nil:
+		return "有人申请控制,等你允许"
+	case st.Controller != "":
+		return "正在被远程控制"
+	default:
+		return "运行中"
+	}
+}
+
+// remoteControlPort 返回要映射到公网的远控端口;没开启时返回 0。
+//
+// 关着的时候必须在路由器上留空。这是"默认关闭 = 零攻击面"在公网侧的
+// 落实 —— 它不只是一个界面上的开关状态,路由器上真的不该有那个洞。
+func remoteControlPort(cfg config.Config) int {
+	if !cfg.RemoteControl.Enabled {
+		return 0
+	}
+	return cfg.RemoteControl.Port
 }
 
 // lanIP 返回本机的局域网 IPv4 地址。优先私有地址段。

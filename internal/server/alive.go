@@ -56,6 +56,14 @@ func (s *Server) aliveSnapshot() (seen bool, conns int) {
 // 而判断本身是纯的 —— 时间喂进去就行。
 type controlWatcher struct {
 	goneSince time.Time // 页面全没了的时刻;零值表示还有页面开着
+
+	// fired 表示这一轮"开过又关了"已经报告过了。
+	//
+	// 一轮只报一次。不记这个的话,页面一直关着的时候每过一个宽限期就会
+	// 再报一次 —— 而"关页"是一个事件,不是一个持续状态。远程控制开着时
+	// 这个区别尤其要紧:那时候关页不退程序,回调会返回"继续盯着",
+	// 没有 fired 的话它会每几秒被喊一次。
+	fired bool
 }
 
 // gone 报告此刻是否可以认定控制页已经关了。
@@ -64,15 +72,23 @@ type controlWatcher struct {
 func (w *controlWatcher) gone(now time.Time, seen bool, conns int, grace time.Duration) bool {
 	if !seen || conns > 0 {
 		// 还有页面开着,或者压根没人连过 —— 两种情况都不算"关了"。
-		// 计时一并清零:页面回来过,就得从头再等。
+		// 计时一并清零:页面回来过,就得从头再等(也算新的一轮)。
 		w.goneSince = time.Time{}
+		w.fired = false
+		return false
+	}
+	if w.fired {
 		return false
 	}
 	if w.goneSince.IsZero() {
 		w.goneSince = now
 		return false
 	}
-	return now.Sub(w.goneSince) >= grace
+	if now.Sub(w.goneSince) < grace {
+		return false
+	}
+	w.fired = true
+	return true
 }
 
 // handleAlive 是一条一直挂着的 SSE 连接,控制页开着它就开着。
@@ -119,7 +135,12 @@ func (s *Server) handleAlive(w http.ResponseWriter, r *http.Request) {
 }
 
 // watchControlPage 盯着控制页,全都关了且宽限期内没人回来就调一次
-// OnControlPageGone,然后退出。
+// OnControlPageGone。
+//
+// 回调返回 false 表示它已经收尾了(通常是退程序),看门狗随之结束。
+// 返回 true 表示"这次不退,接着盯" —— 远程控制开着时就是这样:关页不退,
+// 但用户之后可能把远控关掉再关页,那时候又该退了。一走了之的话,
+// 后一种情况就再也没人盯着了。
 func (s *Server) watchControlPage(ctx context.Context) {
 	var w controlWatcher
 
@@ -135,8 +156,9 @@ func (s *Server) watchControlPage(ctx context.Context) {
 
 		seen, conns := s.aliveSnapshot()
 		if w.gone(time.Now(), seen, conns, aliveGrace) {
-			s.onControlGone()
-			return
+			if !s.onControlGone() {
+				return
+			}
 		}
 	}
 }

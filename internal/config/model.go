@@ -73,6 +73,35 @@ type AudioConfig struct {
 	BitrateKbps int `json:"bitrateKbps"`
 }
 
+// RemoteControlConfig 是远程控制的配置。
+//
+// 默认**关闭**,这一点是有意的:开启远控意味着程序要监听一个对外端口,
+// 而不开启时它一个端口都不多占。和 AutoPortMap 一样,"对外动作不该在
+// 用户没要求的时候做"。
+type RemoteControlConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// Port 是观看页和输入通道共用的端口(HTTP + WebSocket)。
+	//
+	// 和 WHEP 分端口是必须的:那个端口由 MediaMTX 占着,而我们需要在
+	// 自己的页面里同时提供 WHEP 播放、输入回传和控制权信令。
+	Port int `json:"port"`
+
+	// Token 是链接凭据,首次开启时生成并留在配置文件里。
+	//
+	// 它只决定"能不能连上来看"。真正能不能**操作**由主机当场批准决定,
+	// 见 internal/remotectl。两层是分开的:链接泄露出去,陌生人也只能看。
+	//
+	// 不设 omitempty —— 空值也是有意义的状态(尚未生成),留着更容易排查。
+	Token string `json:"token"`
+
+	// AllowClipboard 打开后控制者与主机之间双向同步剪贴板文本。
+	//
+	// 单独一个开关而不是跟着 Enabled 走:剪贴板会把手边的密码、验证码
+	// 之类的东西送出去,这个决定应该由用户单独做一次。
+	AllowClipboard bool `json:"allowClipboard,omitempty"`
+}
+
 // Config 是完整的运行配置。
 type Config struct {
 	Video VideoConfig `json:"video"`
@@ -100,6 +129,9 @@ type Config struct {
 	// 关着 UPnP 或处于运营商级 NAT 之后,开了也可能用不了 —— 那种情况下
 	// 程序必须安静地退回手动模式,不能影响启动。
 	AutoPortMap bool `json:"autoPortMap,omitempty"`
+
+	// 远程控制(观众经批准后操作本机)。默认关闭,见 RemoteControlConfig。
+	RemoteControl RemoteControlConfig `json:"remoteControl"`
 
 	ControlPort int    `json:"controlPort"`
 	RTSPPort    int    `json:"rtspPort"`
@@ -135,7 +167,12 @@ func Default() Config {
 		},
 		// 上行带宽只是个起点,用户应当在界面里填实测值。
 		// 它只影响"可支撑观众数"的估算,不参与推流。
-		UplinkMbps:  10,
+		UplinkMbps: 10,
+		// 远程控制默认关闭,也不生成令牌 —— 令牌在用户第一次开启时
+		// 才创建,免得每个从没用过这个功能的配置文件里都躺着一串秘密。
+		RemoteControl: RemoteControlConfig{
+			Port: 8090,
+		},
 		ControlPort: 8080,
 		RTSPPort:    o.RTSPPort,
 		RTMPPort:    o.RTMPPort,
@@ -197,6 +234,27 @@ func (c *Config) Normalize() {
 	}
 	if c.StreamPath == "" {
 		c.StreamPath = d.StreamPath
+	}
+
+	// 远控端口不能和别人撞车。控制页那个服务只绑回环、远控要绑 0.0.0.0,
+	// 撞上之后谁先起来另一个就起不来,而且报错是完全没有线索的
+	// "address already in use"。这里直接退回默认端口,并由启用时的
+	// 绑定失败把真正的冲突报给用户。
+	if c.RemoteControl.Port <= 0 || c.RemoteControl.Port > 65535 ||
+		c.RemoteControl.Port == c.ControlPort ||
+		c.RemoteControl.Port == c.WebRTCPort ||
+		c.RemoteControl.Port == c.APIPort ||
+		c.RemoteControl.Port == c.RTSPPort ||
+		c.RemoteControl.Port == c.RTMPPort ||
+		c.RemoteControl.Port == c.UDPPort {
+		c.RemoteControl.Port = d.RemoteControl.Port
+	}
+
+	// 令牌只可能是 crypto/rand 32 字节的 base64url 编码(43 个字符)。
+	// 明显短于这个长度说明文件被人改过或者写坏了 —— 清掉,下次开启时
+	// 重新生成。宁可让旧链接失效,也不要拿一个弱令牌当凭据。
+	if len(c.RemoteControl.Token) < 32 {
+		c.RemoteControl.Token = ""
 	}
 	// 没有公网地址就无所谓"是不是自动写的"。不归零的话,用户清空地址之后
 	// 这个标记会一直挂着,下次自动写入时看不出区别,但配置读起来是矛盾的。

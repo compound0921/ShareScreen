@@ -43,6 +43,26 @@ const els = {
   errorBox: $('errorBox'),
   errorText: $('errorText'),
   cmdText: $('cmdText'),
+
+  rcField: $('rcField'),
+  rcEnabled: $('rcEnabled'),
+  rcUnsupported: $('rcUnsupported'),
+  rcHint: $('rcHint'),
+  rcPort: $('rcPort'),
+  rcClipboard: $('rcClipboard'),
+  rcLinks: $('rcLinks'),
+  rcLinkList: $('rcLinkList'),
+  rcQr: $('rcQr'),
+  rcRotate: $('rcRotate'),
+  rcPending: $('rcPending'),
+  rcPendingFrom: $('rcPendingFrom'),
+  rcApprove: $('rcApprove'),
+  rcDeny: $('rcDeny'),
+  rcControlling: $('rcControlling'),
+  rcControllerText: $('rcControllerText'),
+  rcElevated: $('rcElevated'),
+  rcRevoke: $('rcRevoke'),
+  rcError: $('rcError'),
 };
 
 // ── 本地状态 ──
@@ -480,6 +500,12 @@ async function poll() {
 
     if (res.portMap !== undefined) renderPortMap(res.portMap);
 
+    if (res.remoteControl) {
+      renderRemoteControl(res.remoteControl, !!res.remoteSupported);
+    } else {
+      els.rcField.hidden = true;
+    }
+
     // 公网地址可能被自动映射换掉了(拿到的公网 IP 变了)。换了就得重渲染
     // 观看链接,否则页面上挂的还是旧地址。
     //
@@ -489,6 +515,191 @@ async function poll() {
     }
   } catch {
     // 轮询失败不打断界面 —— 通常意味着程序正在退出
+  }
+}
+
+// ── 远程控制 ──
+
+// rcLinkKey 记住上一次渲染可控制链接用的"凭据+端口"组合。
+//
+// poll 每两秒跑一次,不加这个判断就会每两秒重建一次链接列表和二维码,
+// 页面看上去一直在闪。
+let rcLinkKey = '';
+
+// rcSupported 是"当前采集源能不能远控"。远控接口的返回里不带这个
+// (它只跟采集源有关,和远控本身的状态无关),所以在这里留一份。
+let rcSupported = true;
+
+// renderRemoteControl 画远程控制面板。
+//
+// st 为 null 表示这一版没有这个能力(或者还没拿到状态),整块藏起来 ——
+// 宁可不显示,也不要显示一个点了没反应的面板。
+function renderRemoteControl(st, supported) {
+  if (!st) {
+    els.rcField.hidden = true;
+    return;
+  }
+  els.rcField.hidden = false;
+
+  const on = !!st.enabled;
+
+  // 正在输入的时候不回填,否则用户打到一半的数字会被冲掉
+  if (document.activeElement !== els.rcEnabled) els.rcEnabled.checked = on;
+  if (document.activeElement !== els.rcPort) els.rcPort.value = st.port;
+  if (document.activeElement !== els.rcClipboard) els.rcClipboard.checked = !!st.clipboard;
+  els.rcClipboard.disabled = !on;
+
+  // 采集源不支持远控时,提前把开关禁掉并把原因说出来 —— 让用户勾上一个
+  // 注定失败的开关,再告诉他"当前采集源不支持",是更差的体验。
+  rcSupported = supported;
+  els.rcEnabled.disabled = !supported;
+  els.rcUnsupported.hidden = supported;
+  els.rcHint.hidden = !supported;
+
+  els.rcError.hidden = !st.lastError;
+  if (st.lastError) els.rcError.textContent = st.lastError;
+
+  // 待批准。这是整个面板里唯一需要用户立刻做决定的东西,所以它放在
+  // 链接列表前面,并且会改页面标题 —— 用户可能正开着别的标签页。
+  const pending = st.pending;
+  els.rcPending.hidden = !pending;
+  if (pending) {
+    els.rcPendingFrom.textContent =
+      `来自 ${pending.remoteIp} 的申请,一分钟内不答复就自动作废。`;
+    els.rcApprove.dataset.id = pending.id;
+    els.rcDeny.dataset.id = pending.id;
+    document.title = '⚠ 有人申请控制 — ShareScreen';
+  } else {
+    document.title = 'ShareScreen';
+  }
+
+  // 正在被控制
+  const controlling = !!st.controller;
+  els.rcControlling.hidden = !controlling;
+  if (controlling) {
+    els.rcControllerText.textContent = `正在被 ${st.controller} 控制`;
+  }
+  els.rcElevated.hidden = !(controlling && st.elevated);
+
+  // 链接:只在凭据或端口变了的时候重新拉一次
+  els.rcLinks.hidden = !on;
+  const key = on ? `${st.token}|${st.port}` : '';
+  if (key !== rcLinkKey) {
+    rcLinkKey = key;
+    if (on) loadRCLinks();
+  }
+}
+
+// loadRCLinks 拉一次可控制链接并渲染。
+async function loadRCLinks() {
+  try {
+    const res = await api('/api/rc/links');
+    renderRCLinks(res.links || []);
+  } catch {
+    // 拉不到就维持现状,下次轮询还会再试
+  }
+}
+
+function renderRCLinks(links) {
+  els.rcLinkList.innerHTML = '';
+
+  if (!links.length) {
+    els.rcLinkList.innerHTML = '<p class="hint">还没有可用的地址</p>';
+    els.rcQr.hidden = true;
+    return;
+  }
+
+  for (const u of links) {
+    const row = document.createElement('div');
+    row.className = 'watch-item';
+
+    const kind = document.createElement('span');
+    kind.className = 'kind';
+    kind.textContent = u.label;
+
+    // 链接带凭据,不渲染成可点的 a 标签 —— 点开会把它留在浏览器历史里,
+    // 而这个链接是能操作本机的。只提供复制。
+    const text = document.createElement('span');
+    text.className = 'rc-link-text';
+    text.textContent = u.url;
+
+    const btn = document.createElement('button');
+    btn.textContent = '复制';
+    btn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(u.url);
+        btn.textContent = '已复制';
+      } catch {
+        btn.textContent = '复制失败';
+      }
+      setTimeout(() => { btn.textContent = '复制'; }, 1200);
+    };
+
+    row.append(kind, text, btn);
+    els.rcLinkList.appendChild(row);
+  }
+
+  const preferred = links.find((u) => u.kind === 'public') || links[0];
+  els.rcQr.src = '/api/qr.png?t=' + encodeURIComponent(preferred.url);
+  els.rcQr.hidden = false;
+}
+
+function initRemoteControl() {
+  els.rcEnabled.addEventListener('change', () => {
+    rcPost('/api/rc/enable', { enabled: els.rcEnabled.checked });
+  });
+
+  // 用 change 而不是 input:端口是边打边变的,每敲一个数字就重开一次
+  // 监听会让连接反复断掉。
+  els.rcClipboard.addEventListener('change', () => {
+    rcPost('/api/rc/enable', { allowClipboard: els.rcClipboard.checked });
+  });
+
+  els.rcPort.addEventListener('change', () => {
+    const port = Number(els.rcPort.value);
+    if (port > 0 && port <= 65535) {
+      rcPost('/api/rc/enable', { port });
+    }
+  });
+
+  els.rcRotate.addEventListener('click', () => {
+    if (confirm('重置之后,已经发出去的链接全部失效,需要重新发给对方。继续?')) {
+      rcPost('/api/rc/rotate');
+    }
+  });
+
+  els.rcApprove.addEventListener('click', () => {
+    rcPost('/api/rc/approve', { id: els.rcApprove.dataset.id });
+  });
+  els.rcDeny.addEventListener('click', () => {
+    rcPost('/api/rc/deny', { id: els.rcDeny.dataset.id });
+  });
+
+  // 这个是"刹车",不加确认框:要收回控制权的时候,多一次点击都是负担。
+  els.rcRevoke.addEventListener('click', () => rcPost('/api/rc/revoke'));
+}
+
+// rcPost 调一个远控接口,并把返回的状态立刻画出来。
+//
+// 接口一律返回最新的状态快照,所以这里不用等下一次轮询 —— 点完按钮
+// 界面应该马上变,而不是过两秒才变。
+async function rcPost(path, body) {
+  try {
+    const res = await api(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (res.error) {
+      els.rcError.hidden = false;
+      els.rcError.textContent = res.error;
+    }
+    if (res.remote) renderRemoteControl(res.remote, rcSupported);
+    return res;
+  } catch (e) {
+    els.rcError.hidden = false;
+    els.rcError.textContent = String(e);
+    return null;
   }
 }
 
@@ -561,6 +772,7 @@ async function init() {
   renderWatchURLs(state.watchUrls);
   renderPushURLs(state.pushUrls);
   renderStatus();
+  initRemoteControl();
 
   // 只有采集源变化才重渲染条件字段 —— 它会顺带刷新窗口列表,
   // 挂到所有控件上会导致改个码率就去枚举一遍窗口。

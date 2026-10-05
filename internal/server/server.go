@@ -18,6 +18,7 @@ import (
 	"sharescreen/internal/ffmpeg"
 	"sharescreen/internal/mediamtx"
 	"sharescreen/internal/portmap"
+	"sharescreen/internal/remotectl"
 	"sharescreen/internal/stream"
 	"sharescreen/internal/webui"
 )
@@ -33,6 +34,21 @@ type PortMapper interface {
 	Retry()
 }
 
+// RemoteController 是控制页需要的远程控制能力。
+//
+// 和 PortMapper 一样定成接口:这个包围绕 HTTP 处理器,不该被输入注入、
+// WebSocket 那些东西拖下水;定成接口之后,这里的测试也不必真起一个
+// 监听端口的服务。
+type RemoteController interface {
+	SetEnabled(on bool) error
+	Configure(port int, token string, allowClipboard bool)
+	Status() remotectl.Status
+	Approve(id string) bool
+	Deny(id string) bool
+	Revoke()
+	DisconnectAll()
+}
+
 // Server 持有控制页需要的全部依赖和可变状态。
 type Server struct {
 	stream   *stream.Manager
@@ -44,12 +60,13 @@ type Server struct {
 	cfgPath  string
 	onTopo   func(config.Config) error
 	portMap  PortMapper
+	remote   RemoteController
 
 	cfgMu sync.RWMutex
 	cfg   config.Config
 
 	// 控制页存活状态,见 alive.go。
-	onControlGone func()
+	onControlGone func() bool
 	aliveMu       sync.Mutex
 	aliveConns    int  // 当前开着的控制页数量
 	aliveSeen     bool // 是否曾经有控制页连上来过
@@ -68,6 +85,9 @@ type Options struct {
 	// PortMap 为 nil 表示这一版没有自动映射能力,相关界面元素不显示。
 	PortMap PortMapper
 
+	// RemoteControl 为 nil 表示这一版没有远程控制能力,相关界面元素不显示。
+	RemoteControl RemoteController
+
 	// OnTopologyChange 在需要重建 MediaMTX 配置时调用。
 	//
 	// 只有公网地址变化会触发 —— 那个值写在 MediaMTX 的配置文件里
@@ -75,24 +95,29 @@ type Options struct {
 	// 否则界面上那个输入框就是个摆设。
 	OnTopologyChange func(config.Config) error
 
-	// OnControlPageGone 在控制页关闭后调用一次(判断方式见 alive.go)。
+	// OnControlPageGone 在控制页关闭后调用(判断方式见 alive.go)。
+	//
+	// 返回 false 表示已经收尾了,看门狗随之结束(通常是整程序退出)。
+	// 返回 true 表示这次不退、继续盯着 —— 远程控制开着时就是这样,见
+	// alive.go 的说明。
 	//
 	// nil 表示不启用:关掉浏览器,程序照常在托盘里待着。
-	OnControlPageGone func()
+	OnControlPageGone func() bool
 }
 
 func New(o Options) *Server {
 	s := &Server{
-		stream:   o.Stream,
-		runner:   o.Runner,
-		mtx:      o.MTX,
-		encoders: o.Encoders,
-		presets:  o.Presets,
-		lanIP:    o.LANIP,
-		cfgPath:  o.ConfigPath,
-		cfg:      o.Config,
+		stream:        o.Stream,
+		runner:        o.Runner,
+		mtx:           o.MTX,
+		encoders:      o.Encoders,
+		presets:       o.Presets,
+		lanIP:         o.LANIP,
+		cfgPath:       o.ConfigPath,
+		cfg:           o.Config,
 		onTopo:        o.OnTopologyChange,
 		portMap:       o.PortMap,
+		remote:        o.RemoteControl,
 		onControlGone: o.OnControlPageGone,
 	}
 	s.stream.SetConfig(o.Config)
@@ -120,6 +145,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/qr.png", s.handleQR)
 	mux.HandleFunc("/api/windows", s.handleWindows)
 	mux.HandleFunc("/api/portmap/retry", s.handlePortMapRetry)
+
+	mux.HandleFunc("/api/rc/enable", s.handleRCEnable)
+	mux.HandleFunc("/api/rc/approve", s.handleRCApprove)
+	mux.HandleFunc("/api/rc/deny", s.handleRCDeny)
+	mux.HandleFunc("/api/rc/revoke", s.handleRCRevoke)
+	mux.HandleFunc("/api/rc/rotate", s.handleRCRotate)
+	mux.HandleFunc("/api/rc/links", s.handleRCLinks)
 
 	return mux
 }

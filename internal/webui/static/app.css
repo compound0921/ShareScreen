@@ -368,3 +368,63 @@ details summary {
   user-select: none;
   margin-bottom: 8px;
 }
+
+/* ── 远程控制面板 ── */
+
+.rc-field {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.rc-port-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* 链接不可点:它带着能操作本机的凭据,点开会留在浏览器历史里。
+   只给复制按钮。 */
+.rc-link-text {
+  flex: 1;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.rc-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin: 0 0 4px;
+}
+
+/* 待批准是这块面板里唯一需要用户立刻做决定的东西,给它一个边框把它
+   从周围的信息里拎出来。 */
+.rc-pending {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.rc-pending .actions { margin-bottom: 0; }
+.rc-pending .rc-title { color: var(--warn); }
+
+.rc-controlling {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-str);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.rc-controlling .rc-title { color: var(--ok); }
+
+/* 明文警告用强调色,和普通 hint 区分开 —— 这条是要真的看进去的。 */
+.warn-text { color: var(--warn); }
+
+button.danger {
+  background: transparent;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+button.danger:hover { background: var(--danger); color: #fff; }

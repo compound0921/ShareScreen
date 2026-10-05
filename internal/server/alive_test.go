@@ -67,6 +67,40 @@ func TestControlWatcher(t *testing.T) {
 			t.Fatal("重新计时之后满宽限期仍未认定关闭")
 		}
 	})
+
+	t.Run("一轮只报一次", func(t *testing.T) {
+		// 关页是一个事件,不是一个持续状态。
+		//
+		// 这条在远程控制上是必须的:那时候关页不退程序,回调返回"继续盯着",
+		// 看门狗就留在循环里。如果它每过一个宽限期再报一次,程序会每几秒
+		// 被喊一次,日志也跟着刷。
+		var w controlWatcher
+		w.gone(base, true, 0, grace)
+		if !w.gone(base.Add(grace), true, 0, grace) {
+			t.Fatal("第一次应当认定关闭")
+		}
+		for i := 1; i <= 3; i++ {
+			if w.gone(base.Add(grace+time.Duration(i)*grace), true, 0, grace) {
+				t.Fatalf("第 %d 次又报了一遍 —— 一轮应当只报一次", i)
+			}
+		}
+	})
+
+	t.Run("页面重新开过之后能再报一次", func(t *testing.T) {
+		// 只报一次不能变成"永远不再报"。用户关掉远控、重开页面、再关页,
+		// 这时候就该正常退出了。
+		var w controlWatcher
+		w.gone(base, true, 0, grace)
+		w.gone(base.Add(grace), true, 0, grace)
+
+		if w.gone(base.Add(2*grace), true, 1, grace) {
+			t.Fatal("页面回来了,不该认定关闭")
+		}
+		w.gone(base.Add(3*grace), true, 0, grace)
+		if !w.gone(base.Add(3*grace+grace), true, 0, grace) {
+			t.Fatal("页面重新开过又关掉,应当能再报一次")
+		}
+	})
 }
 
 // 连接数数不回来,页面关掉之后程序就永远不会退 —— 这是整套判断的地基,

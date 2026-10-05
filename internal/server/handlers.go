@@ -11,6 +11,7 @@ import (
 	"sharescreen/internal/config"
 	"sharescreen/internal/ffmpeg"
 	"sharescreen/internal/portmap"
+	"sharescreen/internal/remotectl"
 	"sharescreen/internal/stream"
 	"sharescreen/internal/window"
 )
@@ -51,6 +52,18 @@ type statusResponse struct {
 
 	// PortMap 是自动端口映射的状态快照;没启用这一版功能时为 nil。
 	PortMap *portmap.Snapshot `json:"portMap,omitempty"`
+
+	// RemoteControl 是远程控制的状态快照;没启用这一版功能时为 nil。
+	//
+	// 放在这个 2 秒轮询的端点里,而不是新开一条推送通道:控制页本来
+	// 就在按这个频率刷新,"有人请求控制"晚两秒出现完全可以接受。
+	RemoteControl *remotectl.Status `json:"remoteControl,omitempty"`
+
+	// RemoteSupported 报告当前采集源能不能远程控制。
+	//
+	// 前端拿它来提前禁用开关并说明原因 —— 让用户勾上一个注定失败的
+	// 开关,再告诉他"当前采集源不支持",是更差的体验。
+	RemoteSupported bool `json:"remoteSupported"`
 }
 
 // handleState 返回首屏需要的全部信息。
@@ -134,10 +147,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := s.currentConfig()
 	resp := statusResponse{
-		Status:     s.effectiveStatus(cfg),
-		Viewers:    s.viewerCount(cfg),
-		Capacity:   cfg.Capacity(),
-		PublicHost: cfg.PublicHost,
+		Status:          s.effectiveStatus(cfg),
+		Viewers:         s.viewerCount(cfg),
+		Capacity:        cfg.Capacity(),
+		PublicHost:      cfg.PublicHost,
+		RemoteSupported: ffmpeg.SupportsRemote(cfg.Video),
+	}
+	if s.remote != nil {
+		st := s.remote.Status()
+		resp.RemoteControl = &st
 	}
 	if s.portMap != nil {
 		// Snapshot 内部加锁复制 —— 后台协程正在改那份状态,不能直接把
@@ -248,7 +266,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			// 端口改了必须跟着告知,否则映射还守着旧端口,而 MediaMTX
 			// 已经换到新端口上监听了
 			if old.WebRTCPort != updated.WebRTCPort || old.UDPPort != updated.UDPPort {
-				s.portMap.Configure(portmap.RulesFor(updated.WebRTCPort, updated.UDPPort), s.lanIP)
+				s.syncPortMapRules(updated)
 			}
 		}
 

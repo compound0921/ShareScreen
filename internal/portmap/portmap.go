@@ -74,10 +74,30 @@ type Rule struct {
 // 只映射这两个。推流入口(8554/1935)在任何情况下都不能映射出去 ——
 // 那等于让任何人都能覆盖你的画面。
 func RulesFor(webrtcTCP, mediaUDP int) []Rule {
-	return []Rule{
+	return rules(webrtcTCP, mediaUDP, 0)
+}
+
+// RulesForWithControl 在观看端口之外,再把远程控制的端口也映射出去。
+//
+// rcTCP 传 0 表示远控没开 —— **这是默认情况,也是这个参数存在的全部
+// 意义**:远控关着的时候,路由器上不该有任何指向它的映射。否则一个
+// 用不到的功能会在公网上留个常年开着的门。
+func RulesForWithControl(webrtcTCP, mediaUDP, rcTCP int) []Rule {
+	return rules(webrtcTCP, mediaUDP, rcTCP)
+}
+
+func rules(webrtcTCP, mediaUDP, rcTCP int) []Rule {
+	out := []Rule{
 		{Proto: ProtoTCP, InternalPort: webrtcTCP, ExternalPort: webrtcTCP, Description: "ShareScreen-WHEP"},
 		{Proto: ProtoUDP, InternalPort: mediaUDP, ExternalPort: mediaUDP, Description: "ShareScreen-ICE"},
 	}
+	if rcTCP > 0 {
+		out = append(out, Rule{
+			Proto: ProtoTCP, InternalPort: rcTCP, ExternalPort: rcTCP,
+			Description: "ShareScreen-RemoteControl",
+		})
+	}
+	return out
 }
 
 func (r Rule) extPort() uint16 { return uint16(r.ExternalPort) }

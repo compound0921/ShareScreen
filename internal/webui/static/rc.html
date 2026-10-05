@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ShareScreen 远程</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/rc.css">
+</head>
+<body class="rc">
+
+<div id="stage">
+  <video id="screen" autoplay playsinline muted></video>
+
+  <div id="overlay" class="rc-overlay">
+    <div class="rc-panel">
+      <h1>ShareScreen</h1>
+      <p id="overlayMsg">正在连接画面…</p>
+      <button id="startBtn" class="primary" hidden>开始观看</button>
+      <p class="hint" id="overlayHint"></p>
+    </div>
+  </div>
+</div>
+
+<div id="bar">
+  <span id="status" class="badge badge-idle">准备中</span>
+  <button id="ctlBtn" class="primary" hidden>申请控制</button>
+  <button id="releaseBtn" class="ghost" hidden>归还控制</button>
+  <span id="ctlInfo" class="muted"></span>
+  <span class="rc-spacer"></span>
+  <button id="clipBtn" class="ghost" hidden>剪贴板</button>
+  <button id="muteBtn" class="ghost" hidden>声音:关</button>
+  <button id="fullBtn" class="ghost">全屏</button>
+</div>
+
+<div id="clipPanel" class="rc-clip" hidden>
+  <div class="rc-clip-head">
+    <strong>剪贴板同步</strong>
+    <span class="muted">双向。取不到本机剪贴板时,请手动粘贴到下面的框里。</span>
+    <button id="clipClose" class="ghost">关闭</button>
+  </div>
+
+  <label for="clipText">内容(主机的剪贴板会出现在这里)</label>
+  <textarea id="clipText" rows="6" spellcheck="false"></textarea>
+
+  <div class="rc-clip-actions">
+    <button id="clipCopy" class="ghost">复制到我这里</button>
+    <button id="clipSend" class="primary">发送到主机</button>
+    <span class="muted" id="clipInfo"></span>
+  </div>
+
+  <p class="hint">
+    这个通道是明文的。剪贴板里经常躺着密码和验证码,<strong>没在用的时候把面板关掉、
+    或者在主机那边关掉剪贴板同步</strong>。
+  </p>
+</div>
+
+<pre id="err" class="error-box" hidden></pre>
+
+<script src="/static/rc.js"></script>
+</body>
+</html>

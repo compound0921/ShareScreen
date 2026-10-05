@@ -7,3 +7,7 @@ package screen
 func SetDPIAware() {}
 
 func Size() (w, h int) { return 0, 0 }
+
+func VirtualRect() Rect { return Rect{} }
+
+func MonitorCount() int { return 0 }

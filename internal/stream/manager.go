@@ -122,6 +122,17 @@ func (m *Manager) SetConfig(cfg config.Config) {
 	m.stMu.Unlock()
 }
 
+// Config 返回当前配置的快照。
+//
+// 远程控制要拿它判断采集源覆盖的是哪块屏幕 —— 而采集源随时可能在控制页
+// 被改掉(改成窗口采集之后远控就不该再注入),所以必须每次现读,不能在
+// 启动时抓一份留着。
+func (m *Manager) Config() config.Config {
+	m.stMu.RLock()
+	defer m.stMu.RUnlock()
+	return m.cfg
+}
+
 // SetEncoders 设置本机可用的编码器列表。
 func (m *Manager) SetEncoders(list []ffmpeg.Encoder) {
 	m.stMu.Lock()
