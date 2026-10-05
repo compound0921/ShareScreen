@@ -116,7 +116,6 @@
         </div>
       </div>
     </div>
-    <p class="hint" id="bitrateHint">填实测上传速率,只用于估算观众数。</p>
 
     <div class="field">
       <label for="publicHost">公网地址(可选)</label>
@@ -202,9 +201,7 @@
         <span>同步剪贴板(文本)</span>
       </label>
       <p class="hint">
-        关着的时候只同步鼠标键盘。剪贴板里经常躺着密码、验证码 ——
-        <strong>不用的时候关掉它</strong>,而且它只会和正在控制的那个人同步,
-        纯观看的人拿不到。
+        关着的时候只同步鼠标键盘。
       </p>
 
       <div class="inline-row gap-top">
@@ -221,12 +218,6 @@
         <div class="qr-wrap">
           <img id="rcQr" alt="可控制链接二维码" hidden>
         </div>
-        <p class="hint warn-text">
-          链接里带着凭据,<strong>发给谁就等于允许谁申请控制</strong>。
-          通道是明文的(和观看链接一样),<strong>不要在不信任的网络里开启</strong> ——
-          对方在你机器上敲的字,包括密码,都会以明文经过网络。
-        </p>
-        <button type="button" id="rcRotate" class="ghost">重置凭据(旧链接立即失效)</button>
       </div>
 
       <div class="rc-pending" id="rcPending" hidden>

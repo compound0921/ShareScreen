@@ -10,7 +10,6 @@ const els = {
   captureParams: $('captureParams'),
   pushField: $('pushField'),
   pushList: $('pushList'),
-  bitrateHint: $('bitrateHint'),
   windowField: $('windowField'),
   windowSelect: $('windowSelect'),
   refreshWindows: $('refreshWindows'),
@@ -53,7 +52,6 @@ const els = {
   rcLinks: $('rcLinks'),
   rcLinkList: $('rcLinkList'),
   rcQr: $('rcQr'),
-  rcRotate: $('rcRotate'),
   rcPending: $('rcPending'),
   rcPendingFrom: $('rcPendingFrom'),
   rcApprove: $('rcApprove'),
@@ -179,10 +177,6 @@ function renderSourceFields() {
   els.audioField.hidden = external;
 
   renderAudioFields();
-
-  els.bitrateHint.textContent = external
-    ? '填 OBS 里设的码率,只用于估算观众数。'
-    : '填实测上传速率,只用于估算观众数。';
 
   if (src === 'window') {
     loadWindows();
@@ -659,12 +653,6 @@ function initRemoteControl() {
     const port = Number(els.rcPort.value);
     if (port > 0 && port <= 65535) {
       rcPost('/api/rc/enable', { port });
-    }
-  });
-
-  els.rcRotate.addEventListener('click', () => {
-    if (confirm('重置之后,已经发出去的链接全部失效,需要重新发给对方。继续?')) {
-      rcPost('/api/rc/rotate');
     }
   });
 
