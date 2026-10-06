@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -47,6 +49,8 @@ var (
 	iidAudioClient          = guid{0x1CB9AD4C, 0xDBFA, 0x4C32, [8]byte{0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2}}
 	iidAudioCaptureClient   = guid{0xC8ADBD64, 0xE71E, 0x48A0, [8]byte{0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17}}
 	iidPropertyStore        = guid{0x886D8EEB, 0x8CF2, 0x4446, [8]byte{0x8D, 0x02, 0xCD, 0xBA, 0x1D, 0xBD, 0xCF, 0x99}}
+	// IID_IAudioMeterInformation —— 端点的音量表,用来问"这台此刻在放多响"。
+	iidAudioMeterInformation = guid{0xC02216F6, 0x8C67, 0x4B5B, [8]byte{0x9D, 0x00, 0xD0, 0x08, 0xE7, 0x3E, 0x00, 0x64}}
 
 	// PKEY_Device_FriendlyName —— 端点属性里那个给人看的名字,
 	// 形如 "扬声器 (Realtek(R) Audio)"。
@@ -272,16 +276,56 @@ func parseFormat(p unsafe.Pointer) (Format, error) {
 //
 // 界面上那个下拉框用它。枚举是毫秒级的,按需调用即可。
 func ListDevices() ([]Device, error) {
+	out := []Device{}
+	err := eachDevice(func(_ unsafe.Pointer, id, name string, isDefault bool) {
+		out = append(out, Device{ID: id, Name: name, Default: isDefault})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Levels 返回每台可用播放设备此刻的峰值电平。
+//
+// "别处在放声音"就是靠它判断的。和 ListDevices 走同一趟枚举 —— 两次
+// 分开枚举会拿到两份可能对不上的名单(中途插拔了设备),而这里的两份
+// 信息必须来自同一时刻。
+//
+// 空列表而不是 nil:调用方(和界面)按"没有候选"处理,不该再判一次 nil。
+func Levels() ([]Level, error) {
+	out := []Level{}
+	err := eachDevice(func(dev unsafe.Pointer, id, name string, isDefault bool) {
+		out = append(out, Level{ID: id, Name: name, Default: isDefault, Peak: devicePeak(dev)})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// eachDevice 枚举所有当前可用的播放设备,对每一台调一次 fn。
+//
+// fn 拿到的是 IMMDevice 接口指针,**只在这次调用期间有效** —— 返回之后
+// 就会被释放。想多要一个属性(名字、音量表)就在 fn 里自己取。
+//
+// 单台设备取不到(拔了、状态刚好变了)就跳过,不连累整个列表:能列出
+// 剩下的,也好过一个空的下拉框。
+func eachDevice(fn func(dev unsafe.Pointer, id, name string, isDefault bool)) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
+	// 每次调用都重新声明公寓并重新创建枚举器。调用方可能是一根没有
+	// 锁定线程的轮询协程,它两次调用会落在不同的 OS 线程上 —— 缓存
+	// COM 指针跨调用用,等于赌线程。
+
 	if err := coInit(); err != nil {
-		return nil, err
+		return err
 	}
 
 	var enum unsafe.Pointer
 	if err := coCreateInstance(&clsidMMDeviceEnumerator, &iidMMDeviceEnumerator, &enum); err != nil {
-		return nil, fmt.Errorf("初始化音频设备枚举器失败: %w", err)
+		return fmt.Errorf("初始化音频设备枚举器失败: %w", err)
 	}
 	defer release(enum)
 
@@ -291,13 +335,13 @@ func ListDevices() ([]Device, error) {
 	if err := comCall(enum, 3,
 		endpointRender, deviceStateActive,
 		uintptr(unsafe.Pointer(&coll))); err != nil {
-		return nil, fmt.Errorf("枚举播放设备失败: %w", err)
+		return fmt.Errorf("枚举播放设备失败: %w", err)
 	}
 	defer release(coll)
 
 	var n uint32
 	if err := comCall(coll, 3, uintptr(unsafe.Pointer(&n))); err != nil {
-		return nil, fmt.Errorf("读取播放设备数量失败: %w", err)
+		return fmt.Errorf("读取播放设备数量失败: %w", err)
 	}
 
 	// 先记下系统默认设备的 ID,好在列表里标出来。
@@ -311,24 +355,67 @@ func ListDevices() ([]Device, error) {
 		release(def)
 	}
 
-	out := make([]Device, 0, n)
 	for i := uint32(0); i < n; i++ {
 		var dev unsafe.Pointer
 		if err := comCall(coll, 4, uintptr(i), uintptr(unsafe.Pointer(&dev))); err != nil {
-			continue // 单个设备取不到就跳过,不连累整个列表
+			continue
 		}
 		id, name := deviceID(dev), deviceName(dev)
-		release(dev)
-
 		if id == "" {
+			release(dev)
 			continue
 		}
 		if name == "" {
 			name = "未命名设备"
 		}
-		out = append(out, Device{ID: id, Name: name, Default: id == defaultID})
+		fn(dev, id, name, id == defaultID)
+		release(dev)
 	}
-	return out, nil
+	return nil
+}
+
+// meterWarnOnce 让"这台机器的音量表不可用"只记一条日志。
+//
+// 音量表是可选增强的探测手段,不支持它的驱动完全可能有 —— 每次轮询都
+// 记一条会把日志刷满,而它每次说的都是同一件事。
+var meterWarnOnce sync.Once
+
+// devicePeak 读一台端点此刻的峰值电平。
+//
+// 拿不到就返回 0,**不报错**:0 的含义是"没在放东西",正好让这台设备
+// 从候选里消失 —— 功能静默失效,而不是让采集出问题。
+//
+// IAudioMeterInformation 的方法顺序:
+// 0/1/2 IUnknown / 3 GetPeakValue / 4 GetMeteringChannelCount /
+// 5 GetChannelsPeakValues / 6 QueryHardwareSupport
+//
+// 它是引擎(audiodg)在软件里实现的,不要求我们在这台端点上持有流 ——
+// 正是"有没有别的程序在往它上面放"这个问题要问的东西。
+//
+// 两个已知的偏差,都接受:
+//   - 它量的是**端点音量之前**的信号,所以被静音的设备照样报活跃。
+//     那种情况下建议切过去也听不到东西;
+//   - 别的程序独占占用该设备时它是 0。但独占模式下回环采集本身也用不了,
+//     这个功能碰不到那种情况。
+func devicePeak(dev unsafe.Pointer) float32 {
+	var meter unsafe.Pointer
+	if err := comCall(dev, 3,
+		uintptr(unsafe.Pointer(&iidAudioMeterInformation)),
+		clsctxAll,
+		0, // 激活参数,音量表不用
+		uintptr(unsafe.Pointer(&meter))); err != nil {
+		meterWarnOnce.Do(func() {
+			log.Printf("音频:这台机器的音量表不可用,设备提示将静默失效: %v", err)
+		})
+		return 0
+	}
+	defer release(meter)
+
+	var peak float32
+	if err := comCall(meter, 3, uintptr(unsafe.Pointer(&peak))); err != nil {
+		return 0
+	}
+	return peak
 }
 
 // deviceID 取端点的 ID 字符串(IMMDevice::GetId,下标 5)。
@@ -396,6 +483,10 @@ type Capture struct {
 	// 和配置对不上,调用方据此给用户一条提示。
 	deviceID   string
 	deviceName string
+
+	// audible 记着上一次真正收到非静音数据包的时刻。界面据此判断
+	// "采的这台一直没声音"。
+	audible audibility
 }
 
 // Open 打开默认播放设备的回环采集。
@@ -528,6 +619,14 @@ func (c *Capture) DeviceID() string { return c.deviceID }
 // DeviceName 返回实际打开的播放设备名;取不到名字时可能为空。
 func (c *Capture) DeviceName() string { return c.deviceName }
 
+// SilentFor 返回这台设备已经连续多久没出过声音了。
+//
+// 从 Run 开始计时:一次都还没响过的设备报的是"从开始采集到现在",
+// 不是 0 —— 那正是最该被发现的情况。Run 还没跑起来时返回 0。
+func (c *Capture) SilentFor(now time.Time) time.Duration {
+	return c.audible.silentFor(now)
+}
+
 // Close 释放 COM 对象。可以在任意 MTA 线程上调用。
 func (c *Capture) Close() {
 	if c.capture != nil {
@@ -551,6 +650,10 @@ func (c *Capture) Run(ctx context.Context, w io.Writer) error {
 	if err := coInit(); err != nil {
 		return err
 	}
+
+	// 静音计时从这一刻起算。一个声音都还没听到,所以不能叫 markAudible ——
+	// 见 audibility.restart。
+	c.audible.restart(time.Now())
 
 	// IAudioClient::Start(10)
 	if err := comCall(c.client, 10); err != nil {
@@ -683,6 +786,9 @@ func (c *Capture) drain(buf *[]byte) (int, error) {
 			} else {
 				copy((*buf)[written:written+n],
 					unsafe.Slice((*byte)(data), n))
+				// 真的收到内容了。只有这一条路会推进静音计时 ——
+				// "引擎没产生数据包"和"数据包带静音标志"都不算。
+				c.audible.markAudible(time.Now())
 			}
 			written += n
 		}

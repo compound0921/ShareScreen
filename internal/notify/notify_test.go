@@ -98,3 +98,29 @@ func TestCountdownCopyMatchesMechanism(t *testing.T) {
 		t.Errorf("文案里不该再有「还剩」:%q", got)
 	}
 }
+
+// 按钮下标到 Choice 的映射是"窗口泛化"和"批准语义"之间的接缝,单拎出来测。
+//
+// 这里最容易出的错是**把两个按钮弄反**:允许和拒绝反过来的后果不是弹窗
+// 难看,是主人点「拒绝」把机器交了出去。
+func TestChoiceForIndex(t *testing.T) {
+	tests := []struct {
+		name string
+		idx  int
+		want Choice
+	}{
+		{"下标 0 是右下角那个主色按钮,也就是允许", 0, ChoiceAllow},
+		{"下标 1 是它左边那个,也就是拒绝", 1, ChoiceDeny},
+		{"−1 表示没有做决定(取消、关窗、窗口建不起来)", -1, ChoiceNone},
+		{"越界的下标不能悄悄变成某个按钮", 2, ChoiceNone},
+		{"负数越界同样", -7, ChoiceNone},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := choiceForIndex(tc.idx); got != tc.want {
+				t.Errorf("choiceForIndex(%d) = %v,想要 %v", tc.idx, got, tc.want)
+			}
+		})
+	}
+}

@@ -1,8 +1,12 @@
 // Package notify 在主机屏幕右下角弹一个带两个按钮的通知,并等用户做决定。
 //
-// 只服务于远程控制的批准:观众申请控制之后,主机未必在浏览器控制页前面,
-// 光靠页面上的提示会漏掉整个申请。弹窗是"人在电脑前但不看那个页面"时
-// 唯一能及时通知到他的方式。
+// 两个消费者共用一个窗口:远程控制的批准(观众申请之后,主机未必在浏览器
+// 控制页前面,光靠页面上的提示会漏掉整个申请),以及音频采集设备的提示
+// (采的那台一直没声音、而别处正在放)。两者都是"人在电脑前但不看那个
+// 页面"时唯一能及时通知到他的方式。
+//
+// 窗口机制是同一套,内容由 Prompt 决定 —— 见 AskButtons。批准那条是
+// Ask,语义(允许/拒绝)固定在 Choice 上。
 //
 // # 为什么是自己建窗口
 //
@@ -18,18 +22,25 @@
 // 所以自己 RegisterClassExW + 消息循环,和本程序其他地方处理 Win32 的
 // 方式一致(不引 CGO、不引 GUI 工具包)。
 //
-// # 它是"抢焦点"的,但 Enter 是拒绝
+// # 它是"抢焦点"的,但 Enter 什么也不做
 //
 // 弹窗会主动把前台抢过来(用户的选择)。这带来一个必须处理的风险:
-// 抢焦点的那一刻,用户正在别处敲键盘 —— 如果 Enter 是"允许",一个本来
-// 打给别的窗口的回车就把机器交了出去。所以窗口过程里**硬性截获 VK_RETURN
-// 并映射成拒绝**,不依赖默认按钮那套(那套只在焦点不在别的按钮上时才生效)。
-// 允许必须鼠标点,或者 Alt+Y。
+// 抢焦点的那一刻,用户正在别处敲键盘 —— 一个本来打给别的窗口的回车
+// 绝不能在这里产生效果。所以窗口过程里**硬性截获 VK_RETURN 并把它吃掉**,
+// 不依赖默认按钮那套(那套只在焦点不在别的按钮上时才生效)。
+//
+// "吃掉"和"不管"是两回事:不管的话回车会落到对话框管理器手里,照样能
+// 激活默认按钮。两道都要成立,少一道回车就又能用了。
+//
+// 键盘因此只能表达一件事:Esc 落在**左边那个按钮**上 —— 批准那边是拒绝,
+// 音频提示那边是忽略,两个方向都不动任何东西。主色按钮只能鼠标点,
+// keyAction 里根本没有指向它的取值。
 //
 // 同一个理由见 dialog_windows.go 里 ask() 的 MB_DEFBUTTON2。
 package notify
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -58,15 +69,57 @@ type Request struct {
 	Timeout time.Duration
 }
 
-// Ask 由平台文件实现:
+// Prompt 是一次弹窗要显示的全部内容。
+//
+// 按钮固定两个:两个消费者(批准、音频提示)都只需要两个,而自绘窗口的
+// 布局是按两个按钮写死的。为用不上的槽位做成按钮数组,等于把风险加到
+// 最难测的那一半代码上(paint / 命中测试 / 布局),换不来任何东西。
+type Prompt struct {
+	Title string
+	Body  string
+
+	// Primary 是右下角那个主色按钮上的字,Secondary 是它左边那个灰底的。
+	// 顺序对应 AskButtons 的返回值:0 = Primary,1 = Secondary。
+	Primary   string
+	Secondary string
+
+	// Timeout > 0 时显示倒计时,文案由 Countdown 现算 —— 和 Request.Timeout
+	// 一样,只是这里把文案也交出去,因为两边说的是不同的事
+	//("自动拒绝" / "自动忽略")。
+	Timeout   time.Duration
+	Countdown func(time.Duration) string
+
+	// StealFocus 决定要不要把前台抢过来。
+	//
+	// 抢焦点是有代价的 —— 那一刻用户正在别处敲键盘,所以 Enter 被硬性
+	// 吃掉(见包注释)。当前两条提示都要抢:批准是一条"有人在等着"的
+	// 请求,音频提示是一条不动它就没法处理的状态,两者被忽略过去的代价
+	// 都比打断一次打字大。
+	//
+	// 它还有一个不那么明显的后果:**不抢的话键盘到不了这个窗口**,
+	// Esc 就按不动了,两个按钮只能用鼠标点。窗口本来就是置顶的,
+	// 显示和点击都不受影响,受影响的只有键盘。
+	StealFocus bool
+
+	// Height 是卡片高度(逻辑像素),0 表示用默认值。
+	//
+	// 正文长短差别很大:批准那边一两行就够,音频提示要说清两台设备的
+	// 名字。正文区的高度是从按钮行反推的(见 create),所以高度一改,
+	// 它自己就跟着变。
+	Height int
+}
+
+// AskButtons 由平台文件实现:
 //
 //   - notify_windows.go —— 真正的右下角弹窗
-//   - notify_other.go   —— 存根,直接返回 ChoiceNone
+//   - notify_other.go   —— 存根,直接返回 −1
 //
-// 签名(两边必须一致):Ask(ctx context.Context, req Request) Choice。
-// 它阻塞到用户选择或 ctx 结束;返回 ChoiceNone 表示没有决定,调用方
-// 什么都不用做 —— 超时只让窗口消失,申请由 remotectl 的过期循环作废。
-// 调用方必须是自己的 goroutine,它会阻塞几十秒。
+// 签名(两边必须一致):AskButtons(ctx context.Context, p Prompt) int。
+// 返回按钮下标(0 = Prompt.Primary,1 = Prompt.Secondary),**−1 表示没有
+// 做决定**:ctx 结束、窗口没建起来、或者用户直接关掉了窗口(Alt+F4)。
+//
+// 它阻塞到用户选择或 ctx 结束,调用方必须是自己的 goroutine —— 它会
+// 阻塞几十秒。
 
 // Describe 把请求翻译成弹窗上的标题和**不随时间变化**的那部分正文。
 //
@@ -107,4 +160,37 @@ func CountdownText(remaining time.Duration) string {
 	}
 	secs := int((remaining + time.Second - 1) / time.Second) // 向上取整
 	return fmt.Sprintf("%d 秒后自动拒绝。", secs)
+}
+
+// Ask 弹右下角通知,请用户批准或拒绝一次远程控制申请。
+//
+// 返回 ChoiceNone 表示**没有做决定**:ctx 结束、窗口没建起来、或者用户
+// 直接关掉了窗口。调用方遇到它什么都不要做 —— 申请会自己过期,那套逻辑
+// 只在 remotectl 一处。
+func Ask(ctx context.Context, req Request) Choice {
+	title, body := Describe(req)
+	return choiceForIndex(AskButtons(ctx, Prompt{
+		Title:     title,
+		Body:      body,
+		Primary:   "允许",
+		Secondary: "拒绝",
+		Timeout:   req.Timeout,
+		Countdown: CountdownText,
+		// 批准是抢焦点的。代价和相应的防护见包注释里 Enter 那一段。
+		StealFocus: true,
+	}))
+}
+
+// choiceForIndex 把按钮下标翻译回批准语义。纯函数,便于测试。
+//
+// 下标和 Choice 的对应关系是这套泛化的接缝,单拎出来测:0 是右下角那个
+// 主色按钮(允许),1 是它左边那个(拒绝),−1 是没做决定。
+func choiceForIndex(i int) Choice {
+	switch i {
+	case 0:
+		return ChoiceAllow
+	case 1:
+		return ChoiceDeny
+	}
+	return ChoiceNone
 }

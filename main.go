@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"sharescreen/internal/audio"
 	"sharescreen/internal/clipboard"
 	"sharescreen/internal/config"
 	"sharescreen/internal/ffmpeg"
@@ -405,6 +406,21 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 			log.Printf("远程控制未能开启: %v", err)
 		}
 	}
+
+	// 采的那台一直没声音、而别处正在放 → 右下角问一句要不要换过去。
+	//
+	// 放在这里是因为它同时要够着三样东西:采集的实时状态(manager)、设备
+	// 列表(audio)、以及"有没有远控弹窗占着右下角"(remote)。internal/ 下
+	// 没有任何一个包同时够得着它们,所以装配留在根上。
+	startAudioHint(ctx, &audioHint{
+		capture:   manager.AudioCapture,
+		levels:    audio.Levels,
+		running:   func() bool { return manager.Status().Running },
+		remoteOut: func() bool { return remote.Status().Pending != nil },
+		prompt:    notify.AskButtons,
+		switchTo:  srv.SetAudioDevice,
+		now:       time.Now,
+	})
 
 	errCh := make(chan error, 1)
 	go func() {

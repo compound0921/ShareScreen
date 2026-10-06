@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 )
 
 // ErrUnsupported 表示当前平台没有桌面音频采集能力。
@@ -24,6 +25,9 @@ func OpenDevice(string) (*Capture, error) { return nil, ErrUnsupported }
 // ListDevices 在所有非 Windows 平台上都返回空列表。
 func ListDevices() ([]Device, error) { return nil, ErrUnsupported }
 
+// Levels 在所有非 Windows 平台上都失败。
+func Levels() ([]Level, error) { return nil, ErrUnsupported }
+
 // Format 返回零值 —— 这些平台上根本走不到这里。
 func (c *Capture) Format() Format { return c.format }
 
@@ -32,6 +36,9 @@ func (c *Capture) DeviceID() string { return "" }
 
 // DeviceName 返回空串。
 func (c *Capture) DeviceName() string { return "" }
+
+// SilentFor 返回 0 —— 这些平台上没有采集,也就无从谈起静音。
+func (c *Capture) SilentFor(time.Time) time.Duration { return 0 }
 
 // Close 什么也不做。
 func (c *Capture) Close() {}

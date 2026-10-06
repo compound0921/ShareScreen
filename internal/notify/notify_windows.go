@@ -140,24 +140,25 @@ const (
 
 	tmeLeave = 0x00000002
 
-	// 按钮索引
-	btnNone  = -1
-	btnAllow = 0
-	btnDeny  = 1
+	// 按钮索引。0 是右下角那个主色按钮(Prompt.Primary),1 是它左边那个
+	// 灰底的(Prompt.Secondary)。顺序对应 AskButtons 的返回值。
+	btnNone      = -1
+	btnPrimary   = 0
+	btnSecondary = 1
 )
 
 // 配色。ColorRef 是 0x00BBGGRR(蓝在最高字节),不是 RGB 顺序。
 const (
-	colBg          = 0x00FFFFFF // 白卡片
-	colBorder      = 0x00E8E8E8
-	colTitle       = 0x00202020
-	colBody        = 0x00666666
-	colDenyBg      = 0x00F2F2F2
-	colDenyBgHover = 0x00E2E2E2
-	colDenyFg      = 0x00333333
-	colAllowBg     = 0x00F67D2D // RGB(45,125,246) 蓝
-	colAllowHover  = 0x00DC691E // RGB(30,105,220)
-	colAllowFg     = 0x00FFFFFF
+	colBg             = 0x00FFFFFF // 白卡片
+	colBorder         = 0x00E8E8E8
+	colTitle          = 0x00202020
+	colBody           = 0x00666666
+	colSecondaryBg    = 0x00F2F2F2
+	colSecondaryHover = 0x00E2E2E2
+	colSecondaryFg    = 0x00333333
+	colPrimaryBg      = 0x00F67D2D // RGB(45,125,246) 蓝
+	colPrimaryHover   = 0x00DC691E // RGB(30,105,220)
+	colPrimaryFg      = 0x00FFFFFF
 )
 
 // 逻辑尺寸(96 DPI 下的像素),实际用前都乘 dpi/96。
@@ -245,11 +246,17 @@ type popupState struct {
 	dpi  int // 逻辑尺寸换算用,建窗口时定下来
 
 	title, body string
-	allowR      rect
-	denyR       rect
-	bodyR       rect
+	// 两个按钮上的字,来自 Prompt。批准那边是「允许」「拒绝」,音频提示
+	// 那边是「切换」「忽略」—— 窗口这一层不认识它们的意思。
+	primaryLabel, secondaryLabel string
+	// countdown 把剩余时间变成正文里那一行。nil 表示这条提示没有倒计时。
+	countdown func(time.Duration) string
 
-	// deadline 是这份申请作废的时刻。倒计时按它现算,每秒重绘一次。
+	primaryR   rect
+	secondaryR rect
+	bodyR      rect
+
+	// deadline 是这个窗口有意义的截止时刻。倒计时按它现算,每秒重绘一次。
 	// 零值表示不显示倒计时。
 	deadline time.Time
 
@@ -257,9 +264,10 @@ type popupState struct {
 	pressed  int32
 	tracking bool
 
-	// decided 表示用户点过按钮或按过键。没有它就说明是超时/被取消/直接关窗。
+	// decided 表示用户点过按钮或按过键。没有它就说明是被取消/直接关窗。
 	decided bool
-	choice  Choice
+	// result 是用户按下的按钮下标;没做决定时无意义(看 decided)。
+	result int
 
 	destroyed bool
 	done      chan struct{}
@@ -282,11 +290,11 @@ func lookupState(h windows.Handle) *popupState {
 	return states[h]
 }
 
-// decide 记下用户的选择并关窗。重复调用只有第一次算数。
-func (st *popupState) decide(c Choice) {
+// decide 记下用户按了哪个按钮并关窗。重复调用只有第一次算数。
+func (st *popupState) decide(idx int) {
 	st.mu.Lock()
 	if !st.decided {
-		st.decided, st.choice = true, c
+		st.decided, st.result = true, idx
 	}
 	st.mu.Unlock()
 	st.requestClose()
@@ -311,11 +319,11 @@ func (st *popupState) requestClose() {
 
 // buttonAt 返回坐标落在哪个按钮上。
 func (st *popupState) buttonAt(x, y int32) int32 {
-	if st.allowR.contains(x, y) {
-		return btnAllow
+	if st.primaryR.contains(x, y) {
+		return btnPrimary
 	}
-	if st.denyR.contains(x, y) {
-		return btnDeny
+	if st.secondaryR.contains(x, y) {
+		return btnSecondary
 	}
 	return btnNone
 }
@@ -333,14 +341,14 @@ func (st *popupState) setHover(idx int32) {
 
 func (st *popupState) invalidateButtons() {
 	st.mu.Lock()
-	a, d := st.allowR, st.denyR
+	p, s := st.primaryR, st.secondaryR
 	hwnd := st.hwnd
 	st.mu.Unlock()
 	if hwnd == 0 {
 		return
 	}
-	procInvalidateRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&a)), 0)
-	procInvalidateRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&d)), 0)
+	procInvalidateRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&p)), 0)
+	procInvalidateRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&s)), 0)
 }
 
 // ── 窗口类 ──
@@ -374,10 +382,10 @@ func registerClass() error {
 
 // ── 对外入口 ──
 
-// Ask 弹出右下角通知并阻塞,直到用户选择或 ctx 结束。
+// AskButtons 弹出右下角通知并阻塞,直到用户选择或 ctx 结束。
 //
-// 见 notify.go 的包注释:返回 ChoiceNone 表示没有决定,调用方什么都不做。
-func Ask(ctx context.Context, req Request) Choice {
+// 见 notify.go 的 AskButtons 注释:返回按钮下标,−1 表示没有做决定。
+func AskButtons(ctx context.Context, p Prompt) int {
 	// 窗口只能在创建它的线程上被销毁,消息循环也必须固定在同一条线程上。
 	// LockOSThread 之后这条线程就专属于这个弹窗,goroutine 退出时线程一起
 	// 结束 —— 不会把一条锁定的线程漏在进程里。
@@ -385,16 +393,15 @@ func Ask(ctx context.Context, req Request) Choice {
 	defer runtime.UnlockOSThread()
 
 	if err := registerClass(); err != nil {
-		log.Printf("远控弹窗:注册窗口类失败,这次不弹了: %v", err)
-		return ChoiceNone
+		log.Printf("弹窗:注册窗口类失败,这次不弹了: %v", err)
+		return -1
 	}
 
-	title, body := Describe(req)
 	st := &popupState{done: make(chan struct{}), hover: btnNone, pressed: btnNone}
 
-	if err := st.create(title, body, req.Timeout); err != nil {
-		log.Printf("远控弹窗:创建窗口失败,这次不弹了: %v", err)
-		return ChoiceNone
+	if err := st.create(p); err != nil {
+		log.Printf("弹窗:创建窗口失败,这次不弹了: %v", err)
+		return -1
 	}
 
 	statesMu.Lock()
@@ -420,9 +427,9 @@ func Ask(ctx context.Context, req Request) Choice {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.decided {
-		return st.choice
+		return st.result
 	}
-	return ChoiceNone
+	return -1
 }
 
 func (st *popupState) messageLoop() {
@@ -441,8 +448,8 @@ func (st *popupState) messageLoop() {
 
 		// 键盘先过我们这一关,必须在 TranslateMessage/DispatchMessage 之前。
 		switch keyChoice(m.Message, m.WParam) {
-		case keyDeny:
-			st.decide(ChoiceDeny)
+		case keySecondary:
+			st.decide(btnSecondary)
 			continue
 		case keyConsume:
 			continue
@@ -457,9 +464,9 @@ func (st *popupState) messageLoop() {
 type keyAction int
 
 const (
-	keyIgnore  keyAction = iota // 交回系统
-	keyConsume                  // 吃掉,但不产生任何选择
-	keyDeny                     // 拒绝
+	keyIgnore    keyAction = iota // 交回系统
+	keyConsume                    // 吃掉,但不产生任何选择
+	keySecondary                  // 按下第二个按钮(批准那边是拒绝)
 )
 
 // keyChoice 决定这条键盘消息怎么处理。
@@ -474,9 +481,10 @@ const (
 // 也不是系统控件、没有默认按钮这回事 —— 两道都要成立,少一道回车就
 // 又能用了。
 //
-// Esc 是另一回事:它不是"确认"键,而且方向是安全的(拒绝)。窗口没有
-// 标题栏也没有关闭按钮,Esc 是唯一的"我不想管这件事"。Alt+F4 走
-// WM_CLOSE,那条路不记选择,等于超时。
+// Esc 是另一回事:它不是"确认"键,而且方向是安全的 —— 它落在**左边那个
+// 按钮**上,批准那边是「拒绝」,音频提示那边是「忽略」,两个都不动任何
+// 东西。窗口没有标题栏也没有关闭按钮,Esc 是唯一的"我不想管这件事"。
+// Alt+F4 走 WM_CLOSE,那条路不记选择,等于超时。
 func keyChoice(message uint32, wparam uintptr) keyAction {
 	if message != wmKeyDown {
 		return keyIgnore
@@ -485,7 +493,7 @@ func keyChoice(message uint32, wparam uintptr) keyAction {
 	case vkReturn:
 		return keyConsume
 	case vkEscape:
-		return keyDeny
+		return keySecondary
 	}
 	return keyIgnore
 }
@@ -560,13 +568,11 @@ func wndProc(hwnd windows.Handle, message uint32, wparam, lparam uintptr) uintpt
 
 		// 按下和抬起要落在同一个按钮上才算点击 —— 和系统按钮一致:
 		// 按下之后拖出去再松手是取消。
+		//
+		// 下标直接当结果传下去:buttonAt 只可能给出 0 或 1,而那正是
+		// AskButtons 的约定。
 		if idx := st.buttonAt(x, y); idx != btnNone && idx == pressed {
-			switch idx {
-			case btnAllow:
-				st.decide(ChoiceAllow)
-			case btnDeny:
-				st.decide(ChoiceDeny)
-			}
+			st.decide(int(idx))
 		}
 		return 0
 
@@ -630,7 +636,9 @@ func (st *popupState) paint() {
 	st.mu.Lock()
 	w, h := st.w, st.h
 	title, body := st.title, st.body
-	allowR, denyR := st.allowR, st.denyR
+	primaryLabel, secondaryLabel := st.primaryLabel, st.secondaryLabel
+	countdown := st.countdown
+	primaryR, secondaryR := st.primaryR, st.secondaryR
 	hover, pressed := st.hover, st.pressed
 	fontTitle, fontBody := st.fontTitle, st.fontBody
 	deadline := st.deadline
@@ -647,20 +655,21 @@ func (st *popupState) paint() {
 	drawText(hdc, title, rect{pad, pad - 2, w - pad, pad + 20},
 		fontTitle, colTitle, dtLeft|dtNoPrefix)
 
-	// 正文是两行:固定的"来自谁",加上每秒都在变的倒计时。
+	// 正文是固定的那部分("来自谁"或者"哪台设备在响"),后面接上每秒都在
+	// 变的倒计时 —— 如果这条提示有倒计时的话。
 	//
 	// 倒计时在这里现算,不存进状态 —— 它每秒都变,存下来就得再安排一次
 	// 写入;直接按 deadline 算,重绘多少次都是对的。
-	if !deadline.IsZero() {
-		body += "\n" + CountdownText(time.Until(deadline))
+	if !deadline.IsZero() && countdown != nil {
+		body += "\n" + countdown(time.Until(deadline))
 	}
-	drawText(hdc, body, rect{pad, pad + 24, w - pad, denyR.Top - 8},
+	drawText(hdc, body, rect{pad, pad + 24, w - pad, secondaryR.Top - 8},
 		fontBody, colBody, dtLeft|dtWordBreak|dtNoPrefix)
 
-	drawButton(hdc, denyR, "拒绝", colDenyBg, colDenyBgHover, colDenyFg,
-		fontBody, hover == btnDeny, pressed == btnDeny, int32(st.scale(7)))
-	drawButton(hdc, allowR, "允许", colAllowBg, colAllowHover, colAllowFg,
-		fontBody, hover == btnAllow, pressed == btnAllow, int32(st.scale(7)))
+	drawButton(hdc, secondaryR, secondaryLabel, colSecondaryBg, colSecondaryHover, colSecondaryFg,
+		fontBody, hover == btnSecondary, pressed == btnSecondary, int32(st.scale(7)))
+	drawButton(hdc, primaryR, primaryLabel, colPrimaryBg, colPrimaryHover, colPrimaryFg,
+		fontBody, hover == btnPrimary, pressed == btnPrimary, int32(st.scale(7)))
 }
 
 func drawButton(hdc uintptr, r rect, label string, bg, bgHover, fg uint32,
@@ -740,7 +749,7 @@ func drawText(hdc uintptr, s string, r rect, font windows.Handle, color uint32, 
 
 // ── 创建与布局 ──
 
-func (st *popupState) create(title, body string, timeout time.Duration) error {
+func (st *popupState) create(p Prompt) error {
 	dpi := systemDPI()
 	scale := func(v int) int { return v * dpi / 96 }
 
@@ -749,7 +758,11 @@ func (st *popupState) create(title, body string, timeout time.Duration) error {
 		return err
 	}
 
-	w, h := scale(baseWidth), scale(baseHeight)
+	w := scale(baseWidth)
+	h := scale(baseHeight)
+	if p.Height > 0 {
+		h = scale(p.Height)
+	}
 	margin := scale(baseMargin)
 	pad := scale(basePad)
 	btnW, btnH, btnGap := scale(baseBtnW), scale(baseBtnH), scale(baseBtnGap)
@@ -758,11 +771,17 @@ func (st *popupState) create(title, body string, timeout time.Duration) error {
 	y := int(work.Bottom) - h - margin
 
 	// 弹窗出现前的前台窗口,关闭时要还回去。拿不到(锁屏、安全桌面)就跳过。
-	prevFg, _, _ := procGetForegroundWindow.Call()
+	//
+	// 不抢焦点的那种提示不记它:没有抢过,就没有要还的东西,而记下来
+	// 反而会在关窗时把前台重新"拍"到那个窗口上 —— 次数多了是打扰。
+	prevFg := uintptr(0)
+	if p.StealFocus {
+		prevFg, _, _ = procGetForegroundWindow.Call()
+	}
 
 	hInst, _, _ := procGetModuleHandleW.Call(0)
 	cls := windows.StringToUTF16Ptr(className)
-	winTitle := windows.StringToUTF16Ptr(title)
+	winTitle := windows.StringToUTF16Ptr(p.Title)
 	hwnd, _, callErr := procCreateWindowExW.Call(
 		wsExTopmost|wsExToolWindow,
 		uintptr(unsafe.Pointer(cls)),
@@ -777,20 +796,23 @@ func (st *popupState) create(title, body string, timeout time.Duration) error {
 		return callErr
 	}
 
+	// 两个按钮都从右下角往左排:主按钮贴着右边距,第二个在它左边一格。
 	btnY := int32(h - pad - btnH)
-	allowL := int32(w - pad - btnW)
+	primaryL := int32(w - pad - btnW)
 
 	st.mu.Lock()
 	st.hwnd = windows.Handle(hwnd)
 	st.dpi = dpi
 	st.w, st.h = int32(w), int32(h)
-	st.title, st.body = title, body
-	st.allowR = rect{allowL, btnY, allowL + int32(btnW), btnY + int32(btnH)}
-	st.denyR = rect{allowL - int32(btnGap+btnW), btnY, allowL - int32(btnGap), btnY + int32(btnH)}
+	st.title, st.body = p.Title, p.Body
+	st.primaryLabel, st.secondaryLabel = p.Primary, p.Secondary
+	st.countdown = p.Countdown
+	st.primaryR = rect{primaryL, btnY, primaryL + int32(btnW), btnY + int32(btnH)}
+	st.secondaryR = rect{primaryL - int32(btnGap+btnW), btnY, primaryL - int32(btnGap), btnY + int32(btnH)}
 	// 倒计时每秒重绘这一块,单独记下来 —— 整张卡重绘会闪。
-	st.bodyR = rect{int32(pad), int32(pad + 24), int32(w - pad), st.denyR.Top - 8}
-	if timeout > 0 {
-		st.deadline = time.Now().Add(timeout)
+	st.bodyR = rect{int32(pad), int32(pad + 24), int32(w - pad), st.secondaryR.Top - 8}
+	if p.Timeout > 0 {
+		st.deadline = time.Now().Add(p.Timeout)
 	}
 	st.fontTitle = createFont(scale(baseTitlePt), fwBold)
 	st.fontBody = createFont(scale(baseBodyPt), fwNormal)
@@ -813,13 +835,15 @@ func (st *popupState) create(title, body string, timeout time.Duration) error {
 		procSetTimer.Call(hwnd, countdownTimerID, countdownInterval, 0)
 	}
 
-	// 抢前台。必须在显示之后做,否则窗口还没成为可见的顶层窗口,
-	// SetForegroundWindow 不认。详见 stealFocus。
-	stealFocus(st.hwnd, prevFg)
+	// 抢前台(只有要抢的那种弹窗才做)。必须在显示之后做,否则窗口还没
+	// 成为可见的顶层窗口,SetForegroundWindow 不认。详见 stealFocus。
+	if p.StealFocus {
+		stealFocus(st.hwnd, prevFg)
+	}
 
-	// 光标初始停在"拒绝"上 —— 最安全的那个。只是视觉提示,
-	// 不影响点击(点击按坐标判定)。
-	st.setHover(btnDeny)
+	// 光标初始停在第**二**个按钮上 —— 那个不动任何东西,是最安全的。
+	// 只是视觉提示,不影响点击(点击按坐标判定)。
+	st.setHover(btnSecondary)
 	return nil
 }
 

@@ -654,6 +654,24 @@ func (m *Manager) stopAudio() {
 	cap.Close()
 }
 
+// AudioCapture 报告当前在采的音频设备,以及它已经静音多久。
+//
+// ok 为假表示这次共享**没有音频**:没开音频、采集还没起来、或者起流那步
+// 失败了。调用方据此什么都不做 —— "没有音频"和"音频是静音的"是两件
+// 不同的事,混在一起会在没开音频时也去提示用户换设备。
+//
+// 取字段要在 stMu 之下:stopAudio 跑在 opMu 那根协程上,和任何轮询
+// 协程是并发的,直接读 m.audio 是数据竞争。
+func (m *Manager) AudioCapture() (deviceID, name string, silentFor time.Duration, ok bool) {
+	m.stMu.RLock()
+	cap := m.audio
+	m.stMu.RUnlock()
+	if cap == nil {
+		return "", "", 0, false
+	}
+	return cap.DeviceID(), cap.DeviceName(), cap.SilentFor(time.Now()), true
+}
+
 // setWarning 记录一条"不影响推流但用户该知道"的问题。
 func (m *Manager) setWarning(msg string) {
 	m.stMu.Lock()

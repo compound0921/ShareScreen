@@ -17,7 +17,7 @@ func TestKeyChoice(t *testing.T) {
 		// 选择。注意"吃掉"和"不管"是两回事:不管的话回车会落到对话框
 		// 管理器手里去激活默认按钮。
 		{"Enter 只吃掉,不产生任何选择", wmKeyDown, vkReturn, keyConsume},
-		{"Esc 是拒绝 —— 方向安全,而且是唯一的取消方式", wmKeyDown, vkEscape, keyDeny},
+		{"Esc 落在左边那个按钮上 —— 方向安全,而且是唯一的取消方式", wmKeyDown, vkEscape, keySecondary},
 		{"其他按键交回系统", wmKeyDown, 'A', keyIgnore},
 		{"Tab 之类的也交回系统", wmKeyDown, 0x09, keyIgnore},
 
@@ -41,12 +41,13 @@ func TestKeyChoice(t *testing.T) {
 // 上面那张表已经覆盖了它,但它值得一条自己的用例 —— 它红掉的时候,
 // 读测试的人应当立刻明白出了什么事,而不是从一张表里推论。
 //
-// 注意允许这一侧根本没有键盘路径(keyAction 里没有 keyAllow):键盘
-// 只可能是"什么都不做"或"拒绝",两个方向都是安全的。
+// 注意主按钮那一侧根本没有键盘路径(keyAction 里没有对应 keyPrimary 的
+// 值):键盘只可能是"什么都不做"或"按下右边那个按钮",两个方向都是安全的 ——
+// 允许/切换都只能靠鼠标点。
 func TestEnterNeverDecides(t *testing.T) {
 	for _, m := range []uint32{wmKeyDown, 0x0101, 0x0104, 0x0106} {
-		if got := keyChoice(m, vkReturn); got == keyDeny {
-			t.Errorf("msg=%#x 时回车变成了拒绝 —— 它应当什么都不做", m)
+		if got := keyChoice(m, vkReturn); got == keySecondary {
+			t.Errorf("msg=%#x 时回车按下了按钮 —— 它应当什么都不做", m)
 		}
 	}
 }
