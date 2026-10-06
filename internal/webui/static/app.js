@@ -23,6 +23,9 @@ const els = {
   encoder: $('encoder'),
   bitrateField: $('bitrateField'),
   publicHost: $('publicHost'),
+  publicHostSelect: $('publicHostSelect'),
+  lanHost: $('lanHost'),
+  lanHostSelect: $('lanHostSelect'),
   autoPortMap: $('autoPortMap'),
   portmapStatus: $('portmapStatus'),
   portmapDot: $('portmapDot'),
@@ -152,8 +155,10 @@ function renderForm() {
   els.bitrate.value = String(v.bitrateKbps);
   els.encoder.value = v.encoder || '';
   els.publicHost.value = config.publicHost || '';
+  els.lanHost.value = config.lanHost || '';
   els.autoPortMap.checked = !!config.autoPortMap;
   renderPortMap(null);
+  renderAddressSelects(addrCache);
 
   const a = config.audio || {};
   const abr = a.bitrateKbps || 96;
@@ -446,6 +451,7 @@ async function saveConfig() {
     // 换回默认的 10,于是用户看不见的设定被悄悄改掉)。
     uplinkMbps: config.uplinkMbps,
     publicHost: els.publicHost.value.trim(),
+    lanHost: els.lanHost.value.trim(),
     autoPortMap: els.autoPortMap.checked,
   };
 
@@ -455,8 +461,16 @@ async function saveConfig() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(next),
     });
+    // 两个地址任一变了,右边那两条链接都得重拉。
+    //
+    // 不能指望轮询去发现:下面这行把 config 更新成服务端的新值之后,轮询那句
+    // `res.publicHost !== config.publicHost` 就恒为假了 —— 链接会一直挂着旧
+    // 地址,直到刷新整个页面。
+    const addrChanged = (config.lanHost || '') !== (next.lanHost || '') ||
+                        (config.publicHost || '') !== (next.publicHost || '');
     config = res.config;
     renderStatus();
+    if (addrChanged) refreshAddressLinks();
     if (res.restarted) {
       els.badge.className = 'badge badge-busy';
       els.badge.textContent = '参数已生效,重启中…';
@@ -498,6 +512,7 @@ async function poll() {
     if (typeof res.viewers === 'number') status.viewers = res.viewers;
     renderStatus();
 
+    if (res.addresses) applyAddresses(res.addresses);
     if (res.portMap !== undefined) renderPortMap(res.portMap);
 
     if (res.remoteControl) {
@@ -512,7 +527,8 @@ async function poll() {
     // 只在真的变了时才重渲染 —— 每 2 秒把列表重建一遍,正在点的那行
     // 会被换掉,复制按钮点不动。
     if (res.publicHost !== undefined && config && res.publicHost !== config.publicHost) {
-      refreshWatchURLs();
+      // 两条都拉 —— 控制链接的主机名同样来自地址
+      refreshAddressLinks();
     }
   } catch {
     // 轮询失败不打断界面 —— 通常意味着程序正在退出
@@ -696,6 +712,137 @@ async function rcPost(path, body) {
   }
 }
 
+// ── 地址下拉 ──
+//
+// 两个字段各是一个下拉 +（只在选「自定义…」时出现的）文本框。
+// **文本框仍然是唯一的数据来源** —— 下拉只负责往里写值,这样保存那条路
+// (saveConfig 读 els.publicHost.value)一行都不用改。
+
+const AUTO = '__auto';     // 「自动」选项的哨兵值
+const CUSTOM = '__custom'; // 「自定义…」选项的哨兵值
+
+// addrCache 是最近一次拿到的候选地址;addrKey 是画下拉用的输入摘要。
+//
+// 轮询每 2 秒跑一次,不加这个判断就会每 2 秒把选项重建一遍 —— 而正在打开的
+// 下拉会被重建打断(和观看链接列表、远控链接列表踩的是同一个坑)。
+let addrCache = null;
+let addrKey = '';
+
+// applyAddresses 收下服务端下发的候选地址,必要时重画下拉。
+function applyAddresses(addr) {
+  if (!addr) return;
+  addrCache = addr;
+
+  // 摘要里要包含"当前选中的是什么" —— 光是候选没变而选中项变了,也得重画
+  const key = JSON.stringify([
+    addr.lan, addr.lanAuto, addr.routerIp, addr.echoIp,
+    config && config.lanHost, config && config.publicHost, config && config.publicHostAuto,
+  ]);
+  if (key === addrKey) return;
+
+  // 用户正拉开着下拉时先别动它,免得把他要点的那个选项换掉
+  if (document.activeElement === els.lanHostSelect ||
+      document.activeElement === els.publicHostSelect) {
+    return;
+  }
+  addrKey = key;
+  renderAddressSelects(addr);
+}
+
+// renderAddressSelects 重建两个下拉。
+function renderAddressSelects(addr) {
+  if (!addr || !config) return;
+  fillSelect(els.lanHostSelect, lanOptions(addr), config.lanHost || '');
+  fillSelect(els.publicHostSelect, publicOptions(addr), currentPublicChoice());
+  syncCustomInputs();
+}
+
+// fillSelect 用 options 重建下拉,并选中 selected;selected 不在列表里就落到
+// 「自定义…」—— 不能让控件显示的和服务端存的不一致(存的是 DDNS 域名时就是
+// 这种情况)。这套做法抄的是 renderEncoders。
+function fillSelect(sel, options, selected) {
+  sel.innerHTML = '';
+  for (const o of options) {
+    const el = document.createElement('option');
+    el.value = o.value;
+    el.textContent = o.label;
+    sel.appendChild(el);
+  }
+  sel.value = options.some((o) => o.value === selected) ? selected : CUSTOM;
+}
+
+// lanOptions 列出局域网候选。
+//
+// 第一项是"自动"(值为空 = 配置里 LanHost 留空),后面每一项是"固定用这个"
+// —— 两者不一样:选了具体那一项之后就不再跟着自动探测走。
+//
+// 「自动」的标注必须用 addr.lanAuto(服务端算出来的那个),**不能拿候选列表
+// 的第一项顶替**:候选是按网卡顺序排的,而这台机器上第一项是 astral 的
+// 10.126.126.1,自动选的却是 192.168.3.236。拿第一项当自动,会同时错两处 ——
+// 下拉说的和链接里的不是同一个,而真正自动选的那个因为被当成"自动"跳过,
+// 反而选不到。
+function lanOptions(addr) {
+  const lan = addr.lan || [];
+  const auto = addr.lanAuto || '';
+  const opts = [{ value: '', label: auto ? `自动（${auto}）` : '自动' }];
+  for (const c of lan) {
+    // 自动选的那个不必再列一遍 —— 它由上面的「自动」代表
+    if (c.host === auto) continue;
+    opts.push({ value: c.host, label: c.label ? `${c.host}（${c.label}）` : c.host });
+  }
+  opts.push({ value: CUSTOM, label: '自定义…' });
+  return opts;
+}
+
+// publicOptions 列出公网候选。
+//
+// 路由器报告的地址**不单列成一项**:它由「自动」代表,选了自动就会跟着它走。
+// 单列一项会诱使人去点它,而那等于把地址钉死 —— 家宽 IP 一变链接就死了,
+// 这正是之前踩的那个坑。
+function publicOptions(addr) {
+  const router = addr.routerIp || '';
+  const opts = [{
+    value: AUTO,
+    label: router ? `自动（路由器报告 ${router}）` : '自动（等路由器报告）',
+  }];
+  if (addr.echoIp) {
+    opts.push({
+      value: addr.echoIp,
+      label: `${addr.echoIp}（外部探测，仅供参考）`,
+    });
+  }
+  opts.push({ value: CUSTOM, label: '自定义…' });
+  return opts;
+}
+
+// currentPublicChoice 返回公网下拉该选中哪一项。
+//
+// 空地址和"上次是自动写的"都算自动 —— 和 config.CanAutoSetPublicHost 同一套
+// 语义,否则下拉会显示"自定义"而实际是自动状态。
+function currentPublicChoice() {
+  if (!config.publicHost || config.publicHostAuto) return AUTO;
+  return config.publicHost;
+}
+
+// syncCustomInputs 按当前选择决定要不要露出文本框。
+function syncCustomInputs() {
+  els.lanHost.hidden = els.lanHostSelect.value !== CUSTOM;
+  els.publicHost.hidden = els.publicHostSelect.value !== CUSTOM;
+}
+
+// refreshAddressLinks 重拉右边那两条链接。
+//
+// 观看链接和控制链接都是**服务端**拼的(主机名 + 端口),所以地址一变就得
+// 重拉 —— 存完配置不会自动重画。
+//
+// 两条都要拉:它们的公共部分都是地址。只拉观看那条的话,控制链接会一直
+// 指向旧地址,而页面看起来"更新过了"。
+function refreshAddressLinks() {
+  refreshWatchURLs();
+  // 远控没开的时候那块面板是藏着的,不必为它跑一趟请求。
+  if (!els.rcLinks.hidden) loadRCLinks();
+}
+
 // refreshWatchURLs 重新拉一次观看地址并渲染。
 async function refreshWatchURLs() {
   try {
@@ -706,6 +853,9 @@ async function refreshWatchURLs() {
     if (document.activeElement !== els.publicHost) {
       els.publicHost.value = config.publicHost;
     }
+    // 地址是程序自动改的,下拉也得跟着回到「自动」那一项 ——
+    // 否则它会停在「自定义」直到下一次轮询(而下次轮询要 2 秒后)。
+    renderAddressSelects(addrCache);
     renderWatchURLs(s.watchUrls);
   } catch {
     // 拉不到就维持现状,下次轮询还会再试
@@ -753,6 +903,7 @@ async function init() {
   }
 
   config = state.config;
+  applyAddresses(state.addresses);
   presets = state.presets || [];
   encoders = state.encoders || [];
   status = state.status || {};
@@ -774,7 +925,7 @@ async function init() {
   });
 
   for (const el of [els.resolution, els.fps, els.bitrate, els.encoder,
-                    els.audioBitrate, els.publicHost]) {
+                    els.audioBitrate, els.publicHost, els.lanHost]) {
     el.addEventListener('change', scheduleSave);
   }
 
@@ -800,6 +951,43 @@ async function init() {
   // (码率、帧率)被顺带触发,那种情况下地址根本没被碰过。
   els.publicHost.addEventListener('input', () => {
     config.publicHostAuto = false;
+    scheduleSave();
+  });
+
+  // 局域网地址:选具体某一项 = 钉住它;选「自动」= 交回探测。
+  els.lanHostSelect.addEventListener('change', () => {
+    const v = els.lanHostSelect.value;
+    if (v === CUSTOM) {
+      syncCustomInputs();
+      els.lanHost.focus();
+      return;
+    }
+    els.lanHost.value = v;
+    syncCustomInputs();
+    scheduleSave();
+  });
+
+  els.publicHostSelect.addEventListener('change', () => {
+    const v = els.publicHostSelect.value;
+    if (v === CUSTOM) {
+      syncCustomInputs();
+      els.publicHost.focus();
+      return;
+    }
+    if (v === AUTO) {
+      // 「自动」不能只是把字段清空。
+      //
+      // ApplyAutoPublicHost 只在路由器报告的地址**变化**时触发,清空之后它
+      // 不会回来重填 —— 字段会一直空着,可能是好几天。所以这里立刻写入当前
+      // 已知的那个地址,并把标记置真,让它以后跟着路由器走。
+      const router = (addrCache && addrCache.routerIp) || '';
+      els.publicHost.value = router;
+      config.publicHostAuto = !!router;
+    } else {
+      els.publicHost.value = v;
+      config.publicHostAuto = false;
+    }
+    syncCustomInputs();
     scheduleSave();
   });
 

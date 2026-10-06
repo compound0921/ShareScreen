@@ -31,6 +31,7 @@ import (
 	"sharescreen/internal/notify"
 	"sharescreen/internal/paths"
 	"sharescreen/internal/portmap"
+	"sharescreen/internal/publicip"
 	"sharescreen/internal/remotectl"
 	"sharescreen/internal/screen"
 	"sharescreen/internal/server"
@@ -359,6 +360,8 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		Encoders:         encoders,
 		Presets:          presets,
 		LANIP:            ip,
+		LANIPs:           lanCandidates(),
+		PublicIP:         publicIPProbe(),
 		ConfigPath:       cfgPath,
 		Config:           cfg,
 		PortMap:          mapper,
@@ -669,12 +672,57 @@ func outboundIP(target string) string {
 // 顺序只是偏好,不是判据 —— 起决定作用的是 chooseLANIP 里的默认路由出口。
 // 这里不再返回"第一个私有地址",因为那正是上面注释里那个 bug。
 func scanLANIPs() []string {
+	ips := make([]string, 0, 4)
+	for _, c := range scanLANAddrs() {
+		ips = append(ips, c.IP)
+	}
+	return ips
+}
+
+// lanCandidates 把网卡扫描结果转成控制页下拉要的候选。
+//
+// Label 填网卡名 —— 这台机器上就有 `astral`(VPN)和 `WLAN` 两块,只写两个
+// IP 用户没法判断哪个是同事能连上的那块。**顺序不能动**:第一条是"自动"
+// 会选的那个,前端据此渲染默认项。
+func lanCandidates() []server.AddressCandidate {
+	addrs := scanLANAddrs()
+	out := make([]server.AddressCandidate, 0, len(addrs))
+	for _, a := range addrs {
+		out = append(out, server.AddressCandidate{Host: a.IP, Label: a.Iface})
+	}
+	return out
+}
+
+// publicIPProbe 构造公网地址的外部探测器。
+//
+// 校验直接复用 portmap.ExternalIPUsable —— 什么算"可用的公网地址"已经有主了
+// (它挡私网、CGNAT、回环、IPv6),抄一份迟早会走散。
+func publicIPProbe() server.PublicIPProbe {
+	return publicip.New(func(s string) bool {
+		ok, _ := portmap.ExternalIPUsable(s)
+		return ok
+	})
+}
+
+// lanAddr 是一个候选地址,连同它来自哪块网卡。
+//
+// 带上网卡名是因为这台机器上就有多块:`astral`(VPN)和 `WLAN`。下拉里只写
+// 两个 IP,用户没法判断哪个是同事能连上的那块。
+type lanAddr struct {
+	IP    string
+	Iface string
+}
+
+// scanLANAddrs 遍历网卡列出可用候选,私有地址段排在前面。
+//
+// 顺序只是偏好,不是判据 —— 起决定作用的是 lanIP() 里的默认路由出口。
+func scanLANAddrs() []lanAddr {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
 
-	var private, other []string
+	var private, other []lanAddr
 	for _, ifi := range ifaces {
 		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagLoopback != 0 {
 			continue
@@ -692,10 +740,11 @@ func scanLANIPs() []string {
 			if ip4 == nil || !isUsableLANIP(ip4.String()) {
 				continue
 			}
+			c := lanAddr{IP: ip4.String(), Iface: ifi.Name}
 			if ip4.IsPrivate() {
-				private = append(private, ip4.String())
+				private = append(private, c)
 			} else {
-				other = append(other, ip4.String())
+				other = append(other, c)
 			}
 		}
 	}

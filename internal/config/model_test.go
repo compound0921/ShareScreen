@@ -53,3 +53,51 @@ func TestDefaultHasAutoPortMapOff(t *testing.T) {
 		t.Error("默认配置不该声称公网地址是自动写入的")
 	}
 }
+
+// LanHost 会被拼进 "http://<这里>:8889/...",所以任何会让它拼出死链的输入
+// 都要挡掉。注意**不要求**它是个能解析的 IP —— 主机名要留得住。
+func TestNormalizeLanHost(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"普通 IP", "192.168.3.236", "192.168.3.236"},
+		{"主机名要留得住", "myhost.local", "myhost.local"},
+		{"首尾空白", "  192.168.3.236  ", "192.168.3.236"},
+		{"粘进来一个完整 URL —— 剥掉协议头", "https://192.168.3.236", "192.168.3.236"},
+		{"http 前缀同样剥掉", "http://myhost.local", "myhost.local"},
+		// 下面这些拼出来是死链,整条丢弃、退回自动
+		{"带端口 —— 端口由程序补,不该写在这里", "192.168.3.236:8889", ""},
+		{"带路径", "192.168.3.236/live", ""},
+		{"中间有空格", "192.168 3.236", ""},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{LanHost: c.in}
+			cfg.Normalize()
+			if cfg.LanHost != c.want {
+				t.Errorf("Normalize(%q) → %q,想要 %q", c.in, cfg.LanHost, c.want)
+			}
+		})
+	}
+}
+
+// LanHost 不该被动过 PublicHostAuto 那套机制 —— 它没有自动写入者,
+// 所以也没有 auto 标记可言。
+func TestLanHostDoesNotTouchPublicHostAuto(t *testing.T) {
+	cfg := Config{PublicHost: "1.2.3.4", PublicHostAuto: true, LanHost: "192.168.1.5"}
+	cfg.Normalize()
+
+	if !cfg.PublicHostAuto {
+		t.Error("LanHost 的存在不该影响 PublicHostAuto")
+	}
+}
+
+// 老配置文件里没有这个字段,读进来必须是"自动"。
+func TestDefaultHasNoLanHost(t *testing.T) {
+	if got := Default().LanHost; got != "" {
+		t.Errorf("默认 LanHost = %q,想要空(空=自动)", got)
+	}
+}

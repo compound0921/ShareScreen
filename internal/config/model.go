@@ -1,7 +1,11 @@
 // Package config 定义运行配置及其持久化。
 package config
 
-import "sharescreen/internal/mediamtx"
+import (
+	"strings"
+
+	"sharescreen/internal/mediamtx"
+)
 
 // SourceType 是采集源类型。
 type SourceType string
@@ -134,6 +138,17 @@ type Config struct {
 	// (比如一个 DDNS 域名)永远不该被程序改掉,而自动写入的值必须跟着
 	// 公网 IP 走 —— 家宽 IP 是会变的。
 	PublicHostAuto bool `json:"publicHostAuto,omitempty"`
+
+	// LanHost 是**局域网链接**里该显示的主机名,留空表示用自动探测到的那个。
+	//
+	// 只管链接。端口映射指向哪台主机不走这里 —— 那是路由表决定的事实,
+	// 不是偏好:选错一块网卡会让路由器收到一个不属于它局域网的内网地址,
+	// 直接回 402 Invalid Args(实测踩过)。多网卡(接了 VPN、Hyper-V、
+	// 蒲公英之类)时自动挑的那块未必是同伴能连上的,所以链接这一侧留个口子。
+	//
+	// 没有配套的 auto 标记:没有任何机制会自动写它(公网那边有 UPnP,
+	// 所以才有 PublicHostAuto),所以标记会没有作者。空 = 自动,够了。
+	LanHost string `json:"lanHost,omitempty"`
 
 	// AutoPortMap 打开后由程序自己通过 UPnP 在路由器上建立端口映射,
 	// 不需要用户进路由器后台手动配。
@@ -273,6 +288,19 @@ func (c *Config) Normalize() {
 	// 这个标记会一直挂着,下次自动写入时看不出区别,但配置读起来是矛盾的。
 	if c.PublicHost == "" {
 		c.PublicHostAuto = false
+	}
+
+	// LanHost 会被拼进 "http://<这里>:8889/...",所以带着协议头或斜杠拼出来
+	// 就是一条死链。用户从别处粘一个完整 URL 进来是很自然的动作,这里替他
+	// 剥掉协议头;剩下的只要有斜杠、冒号或空白就整条丢弃,退回自动。
+	//
+	// **不要求它必须是个能解析的 IP**:`myhost.local` 这类合法主机名要留得住,
+	// 而一个格式对但网段不对的 IP(192.168.99.99)也不该被"智能修正" ——
+	// 那正是下拉里那堆候选存在的意义。
+	c.LanHost = strings.TrimSpace(c.LanHost)
+	c.LanHost = strings.TrimPrefix(strings.TrimPrefix(c.LanHost, "https://"), "http://")
+	if strings.ContainsAny(c.LanHost, "/: \t") {
+		c.LanHost = ""
 	}
 
 	switch c.Video.Encoder {

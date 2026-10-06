@@ -109,13 +109,25 @@
     </div>
 
     <div class="field">
-      <label for="publicHost">公网地址(可选)</label>
-      <input type="text" id="publicHost" placeholder="例如 example.com">
+      <label for="lanHostSelect">局域网观看地址</label>
+      <select id="lanHostSelect"></select>
+      <input type="text" id="lanHost" placeholder="主机名或 IP" hidden>
+      <p class="hint">
+        只影响<strong>显示给你的链接</strong>。多块网卡(VPN、虚拟网卡)时自动挑的
+        那块未必是同事能连上的,可以在这里换一个。
+        <br>端口映射<strong>始终指向能连到路由器的那块网卡</strong> —— 那由路由表
+        决定,不是可选项。
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="publicHostSelect">公网地址(可选)</label>
+      <select id="publicHostSelect"></select>
+      <input type="text" id="publicHost" placeholder="域名或 IP" hidden>
       <p class="hint">
         填<strong>主机</strong>就行(公网 IP 或域名),<strong>不用写端口</strong> ——
-        链接里会自动带上。只有你在路由器上做过端口翻译(外网 8443 → 内网 8889)
-        时才需要写成 <code>域名:8443</code>。
-        <strong>不填则公网观众看不到画面。</strong>
+        链接里会自动带上。<strong>不填则公网观众看不到画面。</strong>
+        <br>选「自动」会跟上路由器报告的地址 —— 家宽的 IP 会变,让它自己跟最省事。
       </p>
     </div>
 

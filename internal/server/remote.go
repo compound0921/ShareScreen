@@ -244,10 +244,10 @@ func (s *Server) remoteLinks(cfg config.Config) []watchURL {
 	suffix := "/rc#t=" + token
 
 	out := []watchURL{}
-	if s.lanIP != "" {
+	if host := s.linkHost(cfg); host != "" {
 		out = append(out, watchURL{
 			Label: "局域网",
-			URL:   fmt.Sprintf("http://%s:%d%s", s.lanIP, port, suffix),
+			URL:   fmt.Sprintf("http://%s:%d%s", host, port, suffix),
 			Kind:  "lan",
 		})
 	}
@@ -274,6 +274,11 @@ func (s *Server) syncPortMapRules(cfg config.Config) {
 	if s.portMap == nil {
 		return
 	}
+	// 转发目标**固定用 s.lanIP**(路由表推导出来的那个),不跟 cfg.LanHost 走。
+	//
+	// 这是"事实"和"偏好"的区别:映射指向哪台主机由路由表决定,选错一块网卡
+	// 会让路由器收到一个不属于它局域网的内网地址,直接回 402 Invalid Args
+	// (实测踩过)。LanHost 只影响链接里显示什么,见 linkHost。
 	s.portMap.Configure(
 		portmap.RulesForWithControl(cfg.WebRTCPort, cfg.UDPPort, cfg.RemoteControl.MappedPort()),
 		s.lanIP)

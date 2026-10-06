@@ -39,6 +39,10 @@ type stateResponse struct {
 	PushURLs  []pushURL           `json:"pushUrls"`
 	Encoders  []ffmpeg.Encoder    `json:"encoders"`
 	Presets   []config.Resolution `json:"presets"`
+
+	// Addresses 是下拉里能选的地址。这里带一份是为了首屏就有东西可选 ——
+	// 只放在 /api/status 里的话,下拉会空到第一次轮询(约 2 秒)才填上。
+	Addresses *addressesResponse `json:"addresses,omitempty"`
 }
 
 type statusResponse struct {
@@ -64,6 +68,10 @@ type statusResponse struct {
 	// 前端拿它来提前禁用开关并说明原因 —— 让用户勾上一个注定失败的
 	// 开关,再告诉他"当前采集源不支持",是更差的体验。
 	RemoteSupported bool `json:"remoteSupported"`
+
+	// Addresses 是下拉里能选的地址。跟着 2 秒轮询下发,因为外部探测的结果
+	// 会变 —— 放在 /api/state 里就只在首次渲染时对一次,之后再也不会更新。
+	Addresses *addressesResponse `json:"addresses,omitempty"`
 }
 
 // handleState 返回首屏需要的全部信息。
@@ -92,6 +100,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		PushURLs:  s.pushURLs(cfg),
 		Encoders:  encoders,
 		Presets:   presets,
+		Addresses: s.buildAddresses(),
 	})
 }
 
@@ -154,6 +163,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Capacity:        cfg.Capacity(),
 		PublicHost:      cfg.PublicHost,
 		RemoteSupported: ffmpeg.SupportsRemote(cfg.Video),
+		Addresses:       s.buildAddresses(),
 	}
 	if s.remote != nil {
 		st := s.remote.Status()
@@ -522,10 +532,12 @@ func (s *Server) watchURLs(cfg config.Config) []watchURL {
 	//
 	// 末尾的斜杠是必须的:MediaMTX 对 /live 发 302 跳到 /live/。
 	out := []watchURL{}
-	if s.lanIP != "" {
+	// 链接里的主机名可以用户指定(LanHost),但**端口映射不走这里** ——
+	// 见 linkHost 的说明。
+	if host := s.linkHost(cfg); host != "" {
 		out = append(out, watchURL{
 			Label: "局域网",
-			URL:   fmt.Sprintf("http://%s:%d/%s/%s", s.lanIP, cfg.WebRTCPort, cfg.StreamPath, playQuery),
+			URL:   fmt.Sprintf("http://%s:%d/%s/%s", host, cfg.WebRTCPort, cfg.StreamPath, playQuery),
 			Kind:  "lan",
 		})
 	}
