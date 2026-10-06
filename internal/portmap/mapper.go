@@ -462,7 +462,11 @@ func (m *Mapper) sync(st *runState) time.Duration {
 		s.Gateway = gw.FriendlyName
 		s.ServiceKind = gw.ServiceKind
 		s.Rules = statuses
-		s.Message = "自动映射已生效 · 外网地址 " + HostPort(externalIP, rules[0].ExternalPort)
+		// 端口清单要列全,不能只写观看端口。远控开着时一共开了三条,
+		// 而这一行是"自动映射生效了"唯一的地方 —— 只说一条,用户就没法
+		// 从界面上确认远控端口到底开没开(实测就是被问到过这件事)。
+		s.Message = fmt.Sprintf("自动映射已生效 · 外网地址 %s · 已开端口 %s",
+			HostPort(externalIP, rules[0].ExternalPort), portList(rules))
 		s.Hint = fmt.Sprintf(
 			"自动映射成功不等于一定可达。请放行 Windows 防火墙的 %s,"+
 				"然后关掉手机 WiFi、用 4G 打开公网链接验证一次。",

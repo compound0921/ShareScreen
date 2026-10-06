@@ -689,3 +689,37 @@ func TestActiveHintMentionsRemoteControlPort(t *testing.T) {
 		t.Errorf("防火墙提示里没有远控端口:%q", snap.Hint)
 	}
 }
+
+// "自动映射已生效"那一行必须列全所有端口。
+//
+// 它是界面上唯一说明"自动映射都开了什么"的地方。只写观看端口的话,远控
+// 开着时用户无法从界面确认远控端口到底开没开 —— 而这一行的语气是"生效了",
+// 很容易被当成"全都好了"。
+func TestActiveMessageListsAllPorts(t *testing.T) {
+	svc := newFake("203.0.113.7")
+	gw := fakeGateway(svc)
+
+	m := newIdle(Options{
+		InternalIP: "192.168.1.5",
+		Rules:      RulesForWithControl(8889, 8189, 8090),
+		DiscoverFn: func(context.Context, time.Duration) ([]*Gateway, error) {
+			return []*Gateway{gw}, nil
+		},
+	})
+
+	m.sync(&runState{})
+	snap := m.Snapshot()
+	if snap.State != StateActive {
+		t.Fatalf("状态 = %s,想要 active(消息:%s)", snap.State, snap.Message)
+	}
+
+	for _, want := range []string{"8889/tcp", "8189/udp", "8090/tcp"} {
+		if !strings.Contains(snap.Message, want) {
+			t.Errorf("成功提示里没有 %s:%q", want, snap.Message)
+		}
+	}
+	// 外网地址仍然要带上观看端口 —— 那是用户直接拿去用的那个地址
+	if !strings.Contains(snap.Message, "203.0.113.7:8889") {
+		t.Errorf("成功提示里没有外网地址:%q", snap.Message)
+	}
+}
