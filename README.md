@@ -316,10 +316,10 @@ go build -ldflags "-H=windowsgui -s -w" -o sharescreen.exe .
 go run ./cmd/genrelease -version 0.1
 ```
 
-产出在 `dist/`:一个 `ShareScreen-1.3.1.zip`(约 70 MB),解压出来是
+产出在 `dist/`:一个 `ShareScreen-1.4.zip`(约 70 MB),解压出来是
 
 ```
-ShareScreen-1.3.1/
+ShareScreen-1.4/
   ShareScreen.exe                  程序本体,8 MB
   使用说明.txt                      给用户看的那一页
   tools/ffmpeg/bin/ffmpeg.exe      采集和编码
