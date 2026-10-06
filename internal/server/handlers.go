@@ -235,6 +235,20 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// 所以标记由前端在"用户真的动了那个输入框"时清掉(见 app.js),
 		// 后端原样采信。见 config.CanAutoSetPublicHost 与 ApplyAutoPublicHost。
 
+		// 远控配置**只经 /api/rc/enable 改**,这条路一律原样保留服务端现值。
+		//
+		// 和公网地址同一类问题,但后果更重。控制页手里的 remoteControl 是
+		// 载入时的快照 —— renderRemoteControl 只回填复选框,从不写回 config
+		// 对象(见 app.js)。于是"开了远控之后再改任意一个视频参数"这条再平常
+		// 不过的操作,提交上来的 enabled 是 false,把服务端配置冲掉,顺带把
+		// Token 和剪贴板开关一起清零 —— 而远控监听还开着。
+		//
+		// 后果不只是界面和实际不一致:VideoConfig 之外,采集端画不画主机光标
+		// 读的也是这个 enabled(见 ffmpeg.CaptureOptsFor)。配置被冲掉之后,
+		// 紧接着由这次改动触发的那次重启就会把光标画回画面里,表现为"远控用
+		// 着好好的,改个帧率之后鼠标又开始拖了"。
+		next.RemoteControl = old.RemoteControl
+
 		if err := s.updateConfig(next); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error": err.Error(),

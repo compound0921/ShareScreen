@@ -47,6 +47,7 @@ const els = {
   rcEnabled: $('rcEnabled'),
   rcUnsupported: $('rcUnsupported'),
   rcHint: $('rcHint'),
+  rcCursorHint: $('rcCursorHint'),
   rcPort: $('rcPort'),
   rcClipboard: $('rcClipboard'),
   rcLinks: $('rcLinks'),
@@ -555,6 +556,9 @@ function renderRemoteControl(st, supported) {
   els.rcEnabled.disabled = !supported;
   els.rcUnsupported.hidden = supported;
   els.rcHint.hidden = !supported;
+  // 光标那一段和 rcHint 同一个条件 —— 采集源不支持远控时,光标根本
+  // 不会从画面里去掉,这时候讲它只会让人以为功能坏了。
+  els.rcCursorHint.hidden = !supported;
 
   els.rcError.hidden = !st.lastError;
   if (st.lastError) els.rcError.textContent = st.lastError;

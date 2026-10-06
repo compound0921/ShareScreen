@@ -442,6 +442,7 @@ func (g *Gateway) DeleteMapping(ctx context.Context, r Rule) error {
 
 // IGD 规范定义的错误码。只列我们用得上的。
 const (
+	codeInvalidArgs         = 402 // 参数不合法(实测:内网地址填了不属于该局域网的主机)
 	codeActionFailed        = 501
 	codeActionNotAuthorized = 606
 	codeNoSuchEntry         = 714 // 条目不存在
@@ -465,6 +466,8 @@ func ErrorCode(err error) int {
 // ErrorCodeName 给错误码一个人话名字,界面和日志都用它。
 func ErrorCodeName(code int) string {
 	switch code {
+	case codeInvalidArgs:
+		return "路由器认为参数不合法(InvalidArgs)—— 通常是映射指向的内网地址不在它这个局域网里"
 	case codeActionFailed:
 		return "路由器拒绝了这个请求(ActionFailed)"
 	case codeActionNotAuthorized:

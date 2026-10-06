@@ -43,10 +43,11 @@ type AudioInput struct {
 // audio 为 nil 时不带音频。
 // srcW/srcH 是采集源的原始尺寸(桌面分辨率),用来判断"目标尺寸等于源尺寸"
 // 这种不需要缩放的伪缩放情况;传 0 表示未知。
+// o 是采集阶段的行为开关 —— 用 CaptureOptsFor 从配置推出来,别在这里现编。
 //
 // 参数顺序遵循 ffmpeg 的约定:输入选项在 -i 之前,输出选项在输入之后。
-func BuildArgs(v config.VideoConfig, audio *AudioInput, enc Encoder, target string, srcW, srcH int) ([]string, error) {
-	input, err := inputArgs(v)
+func BuildArgs(v config.VideoConfig, o CaptureOpts, audio *AudioInput, enc Encoder, target string, srcW, srcH int) ([]string, error) {
+	input, err := inputArgs(v, o)
 	if err != nil {
 		return nil, err
 	}

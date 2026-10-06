@@ -31,10 +31,13 @@ body.rc {
   /* 触摸拖动不要变成页面滚动 */
   touch-action: none;
   background: #000;
+  /* 画面里**没有**主机光标 —— 远控开着时采集端就不画了(见
+     ffmpeg.CaptureOptsFor),指针完全由这里提供。
+     所以这个光标必须显示,而且必须是浏览器自己的:它零延迟、天然平滑。
+     之前这里是 cursor: none,结果是控制者看到的唯一指针是视频里那个
+     0.3–1 秒前的主机光标 —— 手动了指针没动、然后追着跑,就是那个拖拽感。 */
+  cursor: default;
 }
-
-/* 没拿到控制权时,画面上不显示 I 形光标之类的错觉 */
-#screen.controlling { cursor: none; }
 
 /* ── 连接中的遮罩 ── */
 .rc-overlay {

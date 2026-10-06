@@ -102,6 +102,19 @@ type RemoteControlConfig struct {
 	AllowClipboard bool `json:"allowClipboard,omitempty"`
 }
 
+// MappedPort 返回这个远控配置需要在路由器上开的端口;关着的时候返回 0,
+// 表示一条映射都不该有。
+//
+// 单独一个方法是因为这个判断有两个调用点(程序启动时装配映射规则、
+// 远控开关变化时刷新规则),而它们必须永远一致:一处按"关掉就不映射"、
+// 另一处漏了,结果就是关掉远控之后路由器上还留着一个对着公网的洞。
+func (r RemoteControlConfig) MappedPort() int {
+	if !r.Enabled {
+		return 0
+	}
+	return r.Port
+}
+
 // Config 是完整的运行配置。
 type Config struct {
 	Video VideoConfig `json:"video"`

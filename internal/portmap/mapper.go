@@ -110,6 +110,15 @@ type Mapper struct {
 	internal string
 	rules    []Rule
 
+	// removed 是曾经在 rules 里、后来被 Configure 移掉、但还没到路由器上
+	// 撤销的规则。
+	//
+	// 必须有这本账:Configure 只表达"现在要开哪些",不会替我们删。
+	// 少了它,关掉远控(端口从规则里消失)或改远控端口之后,那条映射会
+	// 一直留在路由器上对着公网开着,直到租约到期 —— 而租约是路由器给的,
+	// 可能很长。这直接违背"不开启时公网上不会多出任何指向本机的洞"。
+	removed []Rule
+
 	wake  chan struct{}
 	done  chan struct{}
 	ended chan struct{}
@@ -200,12 +209,89 @@ func (m *Mapper) SetEnabled(on bool) {
 func (m *Mapper) Configure(rules []Rule, internalIP string) {
 	m.mu.Lock()
 	stale := !sameRules(m.rules, rules) || m.internal != internalIP
+
+	// 从规则里消失的端口记进待删队列,由后台协程到路由器上撤掉。
+	for _, old := range m.rules {
+		if !containsRule(rules, old) && !containsRule(m.removed, old) {
+			m.removed = append(m.removed, old)
+		}
+	}
+	// 又被加回来的,取消待删 —— 否则刚建好就被自己撤掉。关掉远控再打开
+	// 是很平常的操作,不能让它变成"映射时有时无"。
+	if len(m.removed) > 0 {
+		kept := m.removed[:0]
+		for _, r := range m.removed {
+			if !containsRule(rules, r) {
+				kept = append(kept, r)
+			}
+		}
+		m.removed = kept
+	}
+
 	m.rules, m.internal = rules, internalIP
 	m.mu.Unlock()
 
 	if stale {
 		m.signal()
 	}
+}
+
+// containsRule 报告 rules 里有没有 r。Rule 全是可比较字段,直接比即可。
+func containsRule(rules []Rule, r Rule) bool {
+	for _, x := range rules {
+		if x == r {
+			return true
+		}
+	}
+	return false
+}
+
+// takeRemoved 取走待删队列。删失败的用 requeueRemoved 放回去。
+func (m *Mapper) takeRemoved() []Rule {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := m.removed
+	m.removed = nil
+	return out
+}
+
+// requeueRemoved 把删失败的规则放回待删队列,下次再试。
+//
+// 这一条不能省:一个删不掉的映射就是一个一直对着公网开着的洞,
+// 丢掉队列等于把它忘了。
+func (m *Mapper) requeueRemoved(rules []Rule) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range rules {
+		// 这期间又被加回来的,别再排队删了
+		if containsRule(m.rules, r) || containsRule(m.removed, r) {
+			continue
+		}
+		m.removed = append(m.removed, r)
+	}
+}
+
+// deleteRemoved 把已经从规则里移掉的映射从路由器上撤销。
+//
+// 不阻塞当前这一轮,也不报给用户 —— 用户表达的意图是"不要这个端口了",
+// 拿一条删除失败去打扰他没有意义。但会放回队列重试。
+func (m *Mapper) deleteRemoved(ctx context.Context, gw *Gateway) {
+	removed := m.takeRemoved()
+	if len(removed) == 0 {
+		return
+	}
+
+	var failed []Rule
+	for _, r := range removed {
+		if err := gw.DeleteMapping(ctx, r); err != nil {
+			log.Printf("自动映射:撤掉不再需要的 %s %d 失败,下次再试: %v",
+				r.Proto, r.ExternalPort, err)
+			failed = append(failed, r)
+			continue
+		}
+		log.Printf("自动映射:已撤掉不再需要的 %s %d", r.Proto, r.ExternalPort)
+	}
+	m.requeueRemoved(failed)
 }
 
 // Retry 立刻重来一次,不等退避。
@@ -263,7 +349,9 @@ func (m *Mapper) run() {
 	st := &runState{}
 	for {
 		if !m.isEnabled() {
-			if st.mapped && st.gateway != nil {
+			// 判据是"有没有路由器可以说话",不是 st.mapped —— 建过一条、
+			// 之后某一轮失败又把它置回 false 的情况,条目其实还在路由器上。
+			if st.gateway != nil {
 				m.deleteAll(st.gateway)
 			}
 			*st = runState{}
@@ -335,6 +423,10 @@ func (m *Mapper) sync(st *runState) time.Duration {
 	gw := st.gateway
 	internal, rules := m.config()
 
+	// 先把不再需要的撤掉。放在建设之前:关掉的端口(比如远控关掉之后的
+	// TCP 8090)不该多留一轮,哪怕这一轮后面会失败。
+	m.deleteRemoved(ctx, gw)
+
 	// 外网地址:拿不到就别往下走了 —— 映射建了也没用。
 	// 它同时也是要写进观看链接的那个地址,所以变化时得通知外面。
 	externalIP, err := gw.ExternalIP(ctx)
@@ -372,9 +464,9 @@ func (m *Mapper) sync(st *runState) time.Duration {
 		s.Rules = statuses
 		s.Message = "自动映射已生效 · 外网地址 " + HostPort(externalIP, rules[0].ExternalPort)
 		s.Hint = fmt.Sprintf(
-			"自动映射成功不等于一定可达。请放行 Windows 防火墙的 %d/tcp 和 %d/udp,"+
+			"自动映射成功不等于一定可达。请放行 Windows 防火墙的 %s,"+
 				"然后关掉手机 WiFi、用 4G 打开公网链接验证一次。",
-			rules[0].ExternalPort, rules[1].ExternalPort)
+			portList(rules))
 	})
 
 	if notify && m.opts.OnChange != nil {
@@ -442,6 +534,9 @@ func (m *Mapper) deleteAll(gw *Gateway) {
 	defer cancel()
 
 	_, rules := m.config()
+	// 连已经不在当前规则里的也一起撤 —— 关掉这个功能之后,路由器上不该
+	// 还剩任何一个由我们开的洞。
+	rules = append(rules, m.takeRemoved()...)
 	for _, r := range rules {
 		if err := gw.DeleteMapping(ctx, r); err != nil {
 			// 删不掉不是致命问题:租约到期它会自己消失。
@@ -467,10 +562,13 @@ func (m *Mapper) fail(st *runState, message string) time.Duration {
 	st.gateway = nil
 	st.mapped = false
 
+	// 提示里要列出实际要开的那几个端口 —— 当前规则可能含远控端口,而它
+	// 只在远控开着时才存在,写死"两条"就会漏掉。
+	_, rules := m.config()
 	m.update(func(s *Snapshot) {
 		s.State = StateFailed
 		s.Message = message
-		s.Hint = manualHint(message)
+		s.Hint = manualHint(message, rules)
 	})
 
 	log.Printf("自动映射:%s(将在 %s 后重试)", message, wait)
@@ -480,13 +578,35 @@ func (m *Mapper) fail(st *runState, message string) time.Duration {
 // manualHint 在自动这条路走不通时,告诉用户下一步做什么。
 //
 // 只说该做什么,不解释原理 —— 用户此刻要的是"那我怎么办"。
-func manualHint(message string) string {
+func manualHint(message string, rules []Rule) string {
 	if containsAny(message, "运营商级 NAT", "内网地址", "IPv6") {
 		return "这台机器的上网出口拿不到公网地址,自动映射帮不上忙。" +
 			"需要改用 VPS 中转或内网穿透,见 docs/公网部署手册.md。"
 	}
-	return "请在路由器后台手动添加两条端口映射:播放端口 TCP 内外一致、" +
-		"媒体端口 UDP 内外一致。详见 README 的「让公网也能看」一节。"
+	return fmt.Sprintf(
+		"请在路由器后台手动添加 %d 条端口映射:%s,内外端口一致。"+
+			"详见 README 的「让公网也能看」一节。",
+		len(rules), portList(rules))
+}
+
+// portList 把要开的那几个端口写成"8889/tcp、8189/udp 和 8090/tcp"。
+//
+// 必须按实际规则生成,不能写死前两条。远控开着时映射有三条,而远控端口
+// 落在 8xxx 之外、又只在开启后才有 —— 提示里漏掉它,用户会照着一份
+// 看起来完整的说明放行完防火墙,然后面对"公网上能看画面、但控制不了",
+// 而且没有任何地方告诉他少了什么。
+func portList(rules []Rule) string {
+	if len(rules) == 0 {
+		return ""
+	}
+	parts := make([]string, len(rules))
+	for i, r := range rules {
+		parts[i] = fmt.Sprintf("%d/%s", r.ExternalPort, strings.ToLower(string(r.Proto)))
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return strings.Join(parts[:len(parts)-1], "、") + " 和 " + parts[len(parts)-1]
 }
 
 func containsAny(s string, subs ...string) bool {
