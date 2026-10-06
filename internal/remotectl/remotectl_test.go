@@ -124,7 +124,7 @@ func TestControlExpire(t *testing.T) {
 		t.Fatal("刚提交的申请不该立刻过期")
 	}
 
-	id, ok := c.expire(time.Now().Add(pendingTimeout + time.Second))
+	id, ok := c.expire(time.Now().Add(PendingTimeout + time.Second))
 	if !ok || id != "a" {
 		t.Fatalf("超时后应当过期并返回 a,得到 %q/%v", id, ok)
 	}

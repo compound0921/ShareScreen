@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sharescreen/internal/config"
@@ -62,6 +63,20 @@ type Server struct {
 	portMap  PortMapper
 	remote   RemoteController
 
+	// lanIPs 是探测到的局域网候选,第一条是"自动"会选的那个。
+	// 只用来填下拉,不参与任何判断。
+	lanIPs []AddressCandidate
+
+	// pubIP 为 nil 表示不做外部探测(测试里就是这个)。
+	pubIP PublicIPProbe
+
+	// 外部探测的结果,由轮询写、由请求读。
+	echoMu     sync.RWMutex
+	echoIP     string
+	echoSource string
+	// echoFailed 挡住"每 10 分钟刷一条一样的失败日志"。
+	echoFailed atomic.Bool
+
 	cfgMu sync.RWMutex
 	cfg   config.Config
 
@@ -81,6 +96,14 @@ type Options struct {
 	LANIP      string
 	ConfigPath string
 	Config     config.Config
+
+	// LANIPs 是探测到的局域网候选,第一条是"自动"会选的那个。
+	// 来自 main 里的网卡扫描,只用来填控制页的下拉。
+	LANIPs []AddressCandidate
+
+	// PublicIP 为 nil 表示不做公网地址的外部探测 ——
+	// 那是个可选增强,没有它一切照常,只是下拉里少一个候选。
+	PublicIP PublicIPProbe
 
 	// PortMap 为 nil 表示这一版没有自动映射能力,相关界面元素不显示。
 	PortMap PortMapper
@@ -113,6 +136,8 @@ func New(o Options) *Server {
 		encoders:      o.Encoders,
 		presets:       o.Presets,
 		lanIP:         o.LANIP,
+		lanIPs:        o.LANIPs,
+		pubIP:         o.PublicIP,
 		cfgPath:       o.ConfigPath,
 		cfg:           o.Config,
 		onTopo:        o.OnTopologyChange,
@@ -167,6 +192,8 @@ func (s *Server) ListenAndServe(ctx context.Context, port int) error {
 	if s.onControlGone != nil {
 		go s.watchControlPage(ctx)
 	}
+	// 跟着 ctx 走,程序退出时一起停
+	s.startAddressPoller(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {

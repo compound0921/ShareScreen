@@ -28,8 +28,10 @@ import (
 	"sharescreen/internal/ffmpeg"
 	"sharescreen/internal/gpu"
 	"sharescreen/internal/mediamtx"
+	"sharescreen/internal/notify"
 	"sharescreen/internal/paths"
 	"sharescreen/internal/portmap"
+	"sharescreen/internal/publicip"
 	"sharescreen/internal/remotectl"
 	"sharescreen/internal/screen"
 	"sharescreen/internal/server"
@@ -167,7 +169,11 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 			}
 		}
 
-		args, err := ffmpeg.BuildArgs(cfg.Video, audioIn, enc, target, desktopW, desktopH)
+		// 和 manager.startOnce 用同一个式子推,否则打印出来的命令
+		// 会在"远控开关"这一项上和实际跑的不一致 —— 而排查时正是
+		// 要靠这条命令去对。
+		opts := ffmpeg.CaptureOptsFor(cfg.Video, cfg.RemoteControl.Enabled)
+		args, err := ffmpeg.BuildArgs(cfg.Video, opts, audioIn, enc, target, desktopW, desktopH)
 		if err != nil {
 			return err
 		}
@@ -245,6 +251,13 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	// 调用丢掉并往日志里写一行错误,而那是我们自己制造的噪音。
 	var trayReady atomic.Bool
 
+	// 主机端的批准弹窗。
+	//
+	// approve/deny/status 要等 remote 造出来才能填,所以先建一个只有 ask 的
+	// 壳 —— OnChange 在 remote.SetEnabled 之前不会被调到(main.go 下面那段),
+	// 而赋值就在它之前,顺序是安全的。和上面 applyHost 那层间接同一个道理。
+	popups := &popupController{ask: notify.Ask}
+
 	remote := remotectl.New(remotectl.Options{
 		WebRTCPort: cfg.WebRTCPort,
 		StreamPath: cfg.StreamPath,
@@ -253,6 +266,10 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 			return ffmpeg.CaptureRect(manager.Config().Video)
 		},
 		OnChange: func(st remotectl.Status) {
+			// 有人申请控制时在右下角弹窗,让主人不用切到控制页也能批准。
+			// 非阻塞:里面只起一个 goroutine。
+			popups.onChange(st)
+
 			// 托盘提示里体现"有人正在控制",这是主人不在屏幕前时
 			// 唯一的可见线索。
 			if trayReady.Load() {
@@ -262,6 +279,10 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	})
 	defer remote.Close()
 	remote.Configure(cfg.RemoteControl.Port, cfg.RemoteControl.Token, cfg.RemoteControl.AllowClipboard)
+
+	popups.approve = remote.Approve
+	popups.deny = remote.Deny
+	popups.status = remote.Status
 
 	// topoMu 串行化重建 MediaMTX。
 	//
@@ -322,7 +343,7 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	var applyHost func(string)
 	mapper := portmap.New(portmap.Options{
 		InternalIP: ip,
-		Rules:      portmap.RulesForWithControl(cfg.WebRTCPort, cfg.UDPPort, remoteControlPort(cfg)),
+		Rules:      portmap.RulesForWithControl(cfg.WebRTCPort, cfg.UDPPort, cfg.RemoteControl.MappedPort()),
 		OnChange:   func(externalIP string) { applyHost(externalIP) },
 	})
 	defer mapper.Close()
@@ -339,6 +360,8 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		Encoders:         encoders,
 		Presets:          presets,
 		LANIP:            ip,
+		LANIPs:           lanCandidates(),
+		PublicIP:         publicIPProbe(),
 		ConfigPath:       cfgPath,
 		Config:           cfg,
 		PortMap:          mapper,
@@ -564,24 +587,142 @@ func remoteStatusText(st remotectl.Status) string {
 	}
 }
 
-// remoteControlPort 返回要映射到公网的远控端口;没开启时返回 0。
+// lanIP 返回本机在局域网里的地址:别人该用它来访问这台机器,端口映射也该指向它。
 //
-// 关着的时候必须在路由器上留空。这是"默认关闭 = 零攻击面"在公网侧的
-// 落实 —— 它不只是一个界面上的开关状态,路由器上真的不该有那个洞。
-func remoteControlPort(cfg config.Config) int {
-	if !cfg.RemoteControl.Enabled {
-		return 0
+// **不能"遍历网卡取第一个私有地址"。** Windows 上 net.Interfaces() 是按网卡
+// 索引返回的,不是按路由优先级 —— 虚拟网卡(VPN、Hyper-V、WSL、蒲公英这类)
+// 经常排在物理网卡前面。实测这台机器上排第一的是 astral(10.126.126.1),
+// 而真正连到路由器的是 192.168.3.236。
+//
+// 拿错地址的后果不是"少个功能":
+//   - 端口映射会让路由器把一个**不属于它局域网**的主机当成转发目标,
+//     实测直接回 402 Invalid Args;
+//   - 局域网观看链接会指向一个谁也连不上的地址。
+//
+// 而且它是偶发的:网卡顺序会随重启、VPN 连接、插拔网线变化。同一个网段里
+// 今天能建上映射、明天报 402,极易被归因成"路由器抽风"。
+//
+// 正确做法是问路由表:朝一个公网地址拨一个 UDP 包(不实际发包),内核会按
+// 默认路由选出出口地址 —— 家用网络里那就是连到路由器的那块网卡。
+func lanIP() string {
+	// 用 IP 字面量,不走 DNS —— 这里只是问内核要一个出口地址,
+	// 解析域名会平白多一次网络往返,断网时还会卡住。
+	outbound := ""
+	for _, target := range []string{"8.8.8.8:80", "1.1.1.1:80"} {
+		if outbound = outboundIP(target); outbound != "" {
+			break
+		}
 	}
-	return cfg.RemoteControl.Port
+	return chooseLANIP(outbound, scanLANIPs())
 }
 
-// lanIP 返回本机的局域网 IPv4 地址。优先私有地址段。
-func lanIP() string {
-	ifaces, err := net.Interfaces()
+// chooseLANIP 在"默认路由出口地址"和"遍历网卡扫出来的候选"之间做选择。
+//
+// 拆成纯函数是为了能测:真实环境下这台机器恰好有虚拟网卡,而 CI 或别人
+// 的机器上没有 —— 把选择逻辑和"怎么拿到候选"分开,这条回归才有地方落。
+func chooseLANIP(outbound string, scanned []string) string {
+	// 默认路由的出口地址优先。它由内核按路由表给出,天然排除了那些
+	// 只是"开着"但并不通往局域网的网卡。
+	if isUsableLANIP(outbound) {
+		return outbound
+	}
+	// 没有默认路由(纯内网、离线)时退回枚举结果 —— 此时它反而是对的,
+	// 因为环境里通常只有一块网卡。
+	for _, ip := range scanned {
+		if isUsableLANIP(ip) {
+			return ip
+		}
+	}
+	return ""
+}
+
+// isUsableLANIP 判断一个地址能不能拿来当"局域网里怎么找到我"。
+//
+// 只收 IPv4:观看链接拼接、MediaMTX 的 ICE 候选都是按 IPv4 验证过的。
+func isUsableLANIP(s string) bool {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return false
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	// 169.254.x.x 是 DHCP 拿不到地址时的自动配置地址,连不上任何东西
+	return !ip4.IsLoopback() && !ip4.IsLinkLocalUnicast()
+}
+
+// outboundIP 返回本机朝 target 发包时会走的那个源地址。
+//
+// UDP 的 Dial 不实际发包,只让内核按路由表选一个出口地址 —— 正是我们要的。
+func outboundIP(target string) string {
+	conn, err := net.Dial("udp", target)
 	if err != nil {
 		return ""
 	}
-	var fallback string
+	defer conn.Close()
+	if a, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return a.IP.String()
+	}
+	return ""
+}
+
+// scanLANIPs 遍历网卡,把候选地址按"私有地址在前"的顺序列出来。
+//
+// 顺序只是偏好,不是判据 —— 起决定作用的是 chooseLANIP 里的默认路由出口。
+// 这里不再返回"第一个私有地址",因为那正是上面注释里那个 bug。
+func scanLANIPs() []string {
+	ips := make([]string, 0, 4)
+	for _, c := range scanLANAddrs() {
+		ips = append(ips, c.IP)
+	}
+	return ips
+}
+
+// lanCandidates 把网卡扫描结果转成控制页下拉要的候选。
+//
+// Label 填网卡名 —— 这台机器上就有 `astral`(VPN)和 `WLAN` 两块,只写两个
+// IP 用户没法判断哪个是同事能连上的那块。**顺序不能动**:第一条是"自动"
+// 会选的那个,前端据此渲染默认项。
+func lanCandidates() []server.AddressCandidate {
+	addrs := scanLANAddrs()
+	out := make([]server.AddressCandidate, 0, len(addrs))
+	for _, a := range addrs {
+		out = append(out, server.AddressCandidate{Host: a.IP, Label: a.Iface})
+	}
+	return out
+}
+
+// publicIPProbe 构造公网地址的外部探测器。
+//
+// 校验直接复用 portmap.ExternalIPUsable —— 什么算"可用的公网地址"已经有主了
+// (它挡私网、CGNAT、回环、IPv6),抄一份迟早会走散。
+func publicIPProbe() server.PublicIPProbe {
+	return publicip.New(func(s string) bool {
+		ok, _ := portmap.ExternalIPUsable(s)
+		return ok
+	})
+}
+
+// lanAddr 是一个候选地址,连同它来自哪块网卡。
+//
+// 带上网卡名是因为这台机器上就有多块:`astral`(VPN)和 `WLAN`。下拉里只写
+// 两个 IP,用户没法判断哪个是同事能连上的那块。
+type lanAddr struct {
+	IP    string
+	Iface string
+}
+
+// scanLANAddrs 遍历网卡列出可用候选,私有地址段排在前面。
+//
+// 顺序只是偏好,不是判据 —— 起决定作用的是 lanIP() 里的默认路由出口。
+func scanLANAddrs() []lanAddr {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+
+	var private, other []lanAddr
 	for _, ifi := range ifaces {
 		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagLoopback != 0 {
 			continue
@@ -596,18 +737,18 @@ func lanIP() string {
 				continue
 			}
 			ip4 := ipnet.IP.To4()
-			if ip4 == nil || ip4.IsLoopback() {
+			if ip4 == nil || !isUsableLANIP(ip4.String()) {
 				continue
 			}
+			c := lanAddr{IP: ip4.String(), Iface: ifi.Name}
 			if ip4.IsPrivate() {
-				return ip4.String()
-			}
-			if fallback == "" {
-				fallback = ip4.String()
+				private = append(private, c)
+			} else {
+				other = append(other, c)
 			}
 		}
 	}
-	return fallback
+	return append(private, other...)
 }
 
 // openBrowser 用系统默认浏览器打开 url。

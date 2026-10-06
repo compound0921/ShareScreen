@@ -5,12 +5,15 @@ import (
 	"time"
 )
 
-// pendingTimeout 是一份控制申请在主机点头之前能挂多久。
+// PendingTimeout 是一份控制申请在主机点头之前能挂多久。
 //
 // 超时自动作废,而不是一直悬着:主机不在电脑前时,申请挂在那里既占着
 // 名额(别人也申请不了),又让观众一直等一个不会来的批准。到点告诉
 // 观众"没人应答",他还可以再试一次。
-const pendingTimeout = 60 * time.Second
+//
+// 导出是因为主机端的批准弹窗要拿它算"还剩多少秒",而那段提示必须和
+// 真正的过期时刻一致 —— 另抄一个 60 秒过去,两边迟早会走散。
+const PendingTimeout = 60 * time.Second
 
 // waiter 是一个会话在控制权上的状态。
 type waiter struct {
@@ -140,7 +143,7 @@ func (c *control) expire(now time.Time) (id string, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.pending == nil || now.Sub(c.pending.at) < pendingTimeout {
+	if c.pending == nil || now.Sub(c.pending.at) < PendingTimeout {
 		return "", false
 	}
 	id = c.pending.id

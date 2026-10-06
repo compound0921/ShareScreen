@@ -117,10 +117,25 @@
     </div>
 
     <div class="field">
-      <label for="publicHost">公网地址(可选)</label>
-      <input type="text" id="publicHost" placeholder="例如 example.com:8443">
+      <label for="lanHostSelect">局域网观看地址</label>
+      <select id="lanHostSelect"></select>
+      <input type="text" id="lanHost" placeholder="主机名或 IP" hidden>
       <p class="hint">
-        格式「IP 或域名[:端口]」。<strong>不填则公网观众看不到画面。</strong>
+        只影响<strong>显示给你的链接</strong>。多块网卡(VPN、虚拟网卡)时自动挑的
+        那块未必是同事能连上的,可以在这里换一个。
+        <br>端口映射<strong>始终指向能连到路由器的那块网卡</strong> —— 那由路由表
+        决定,不是可选项。
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="publicHostSelect">公网地址(可选)</label>
+      <select id="publicHostSelect"></select>
+      <input type="text" id="publicHost" placeholder="域名或 IP" hidden>
+      <p class="hint">
+        填<strong>主机</strong>就行(公网 IP 或域名),<strong>不用写端口</strong> ——
+        链接里会自动带上。<strong>不填则公网观众看不到画面。</strong>
+        <br>选「自动」会跟上路由器报告的地址 —— 家宽的 IP 会变,让它自己跟最省事。
       </p>
     </div>
 
@@ -191,6 +206,13 @@
       <p class="hint" id="rcHint">
         开启后,拿到下面链接的人<strong>经你批准</strong>就能操作这台电脑。
         不开启时程序<strong>不会多监听任何端口</strong>,路由器上也不会多开映射。
+      </p>
+
+      <p class="hint" id="rcCursorHint">
+        开启期间<strong>画面里不再显示主机光标</strong> —— 控制方用自己的光标操作,
+        指针才能跟手,不然看到的是零点几秒前的位置,像在拖着走。
+        代价是这段时间<strong>观看链接里也看不到光标</strong>。
+        切换这个开关会重启采集,黑屏几秒。
       </p>
 
       <label class="check gap-top">

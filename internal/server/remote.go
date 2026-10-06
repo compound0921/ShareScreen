@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"sharescreen/internal/config"
+	"sharescreen/internal/ffmpeg"
 	"sharescreen/internal/portmap"
 	"sharescreen/internal/remotectl"
 )
@@ -68,7 +69,37 @@ func (s *Server) applyRemoteControl(mutate func(*config.RemoteControlConfig)) er
 	// 开启失败时**不**把配置里的开关退回去。失败通常是暂时的(端口被占、
 	// 防火墙没放行),用户下次启动仍然想要这个功能;把开关退回去等于让他
 	// 每次都得重新勾一遍,而真正的原因会随 Status 一起报出来。
-	return s.remote.SetEnabled(next.RemoteControl.Enabled)
+	err := s.remote.SetEnabled(next.RemoteControl.Enabled)
+
+	// 远控开关还决定视频里画不画主机光标(见 ffmpeg.CaptureOptsFor),而那是
+	// ffmpeg 的启动参数 —— 开关一变就得重启采集。这是这个开关唯一的代价:
+	// 点一下黑屏 2–5 秒(连同音频一起重启)。之所以接受,是因为按"此刻有没有
+	// 人持有控制权"来切会在会话中途黑屏,比这更糟。
+	//
+	// 两个约束:
+	//   - updateConfig 必须已经跑过(它在上面)。Restart 是异步的,startOnce
+	//     从配置快照里读光标开关,顺序反了就会拿旧值重启。
+	//   - 比的是"这份配置下画不画光标",不是 Enabled 本身。改剪贴板开关和改
+	//     端口也走这个函数,那些不该重启;而在不支持远控的采集源上打开开关
+	//     (界面会禁用,但配置能被别处写入)同样不该重启。
+	//
+	// 刻意**不**用 err 去挡:开关失败时配置仍然是 Enabled(见上),若这里因为
+	// 失败而不重启,用户修好端口再打开一次时 Enabled 并没有变化,光标就永远
+	// 画不回来了。宁可多一次黑屏,也要让"配置里写的是什么,采集就跑的是什么"
+	// 这条不变量成立。
+	if s.cursorHidden(next) != s.cursorHidden(before) && s.stream.Status().Running {
+		s.stream.Restart()
+	}
+
+	return err
+}
+
+// cursorHidden 报告这份配置下采集会不会把主机光标画进画面。
+//
+// 判定整个交给 ffmpeg.CaptureOptsFor,这里不另写一份 —— 那边是唯一一处
+// 定义,重复一份迟早会在某个分支上分叉。
+func (s *Server) cursorHidden(c config.Config) bool {
+	return !ffmpeg.CaptureOptsFor(c.Video, c.RemoteControl.Enabled).DrawMouse
 }
 
 // handleRCEnable 开关远程控制,顺带可以改端口。
@@ -213,10 +244,10 @@ func (s *Server) remoteLinks(cfg config.Config) []watchURL {
 	suffix := "/rc#t=" + token
 
 	out := []watchURL{}
-	if s.lanIP != "" {
+	if host := s.linkHost(cfg); host != "" {
 		out = append(out, watchURL{
 			Label: "局域网",
-			URL:   fmt.Sprintf("http://%s:%d%s", s.lanIP, port, suffix),
+			URL:   fmt.Sprintf("http://%s:%d%s", host, port, suffix),
 			Kind:  "lan",
 		})
 	}
@@ -243,11 +274,14 @@ func (s *Server) syncPortMapRules(cfg config.Config) {
 	if s.portMap == nil {
 		return
 	}
-	rcPort := 0
-	if cfg.RemoteControl.Enabled {
-		rcPort = cfg.RemoteControl.Port
-	}
-	s.portMap.Configure(portmap.RulesForWithControl(cfg.WebRTCPort, cfg.UDPPort, rcPort), s.lanIP)
+	// 转发目标**固定用 s.lanIP**(路由表推导出来的那个),不跟 cfg.LanHost 走。
+	//
+	// 这是"事实"和"偏好"的区别:映射指向哪台主机由路由表决定,选错一块网卡
+	// 会让路由器收到一个不属于它局域网的内网地址,直接回 402 Invalid Args
+	// (实测踩过)。LanHost 只影响链接里显示什么,见 linkHost。
+	s.portMap.Configure(
+		portmap.RulesForWithControl(cfg.WebRTCPort, cfg.UDPPort, cfg.RemoteControl.MappedPort()),
+		s.lanIP)
 }
 
 // rcAction 是 approve / deny 共用的请求解析。

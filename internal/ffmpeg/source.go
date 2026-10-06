@@ -11,26 +11,67 @@ import (
 // 可用 `ffmpeg -list_devices true -f dshow -i dummy` 查看实际名称。
 const obsDeviceName = "OBS Virtual Camera"
 
+// CaptureOpts 是采集阶段的**行为**开关(相对于 VideoConfig 描述的"采成什么样")。
+//
+// 单独拆出来是为了让这个包不必知道远程控制这个功能的存在:BuildArgs 是
+// 纯命令构造器,只该收到已经决定好的值。策略由 CaptureOptsFor 一处给出。
+type CaptureOpts struct {
+	// DrawMouse 是否把系统光标画进画面。
+	//
+	// 默认 true —— 观看时能看见对方的光标是有用的。远程控制开启时必须
+	// 关掉,否则控制者看到的唯一指针是 0.3–1 秒前的那一个,操作起来像
+	// 在拖东西。关掉之后指针改由控制端自己画(浏览器原生光标,零延迟)。
+	// 见 docs/架构设计.md §12.11。
+	DrawMouse bool
+}
+
+// CaptureOptsFor 由"采集源 + 远控是否开启"推出采集行为开关。
+//
+// 这是光标门控的**唯一**一处定义。多个调用点各写一遍的话,迟早会在某个
+// 分支上分叉,而症状是"光标有时候画、有时候不画",极难归因。
+//
+// 注意门控依据的是远控**开关本身**,不是"此刻有没有人持有控制权":后者
+// 要求在有人取到控制权的那一刻重启采集,会在会话中途黑屏。
+// 代价是远控开着时观看端也看不到光标,这是已知且接受的取舍。
+func CaptureOptsFor(v config.VideoConfig, remoteEnabled bool) CaptureOpts {
+	return CaptureOpts{
+		// 采集源不支持远控时,开关没有意义,光标要留着 ——
+		// 否则就是白白弄丢一个正常观看需要的功能。
+		DrawMouse: !(remoteEnabled && SupportsRemote(v)),
+	}
+}
+
 // inputArgs 返回采集源的输入段参数。
-func inputArgs(v config.VideoConfig) ([]string, error) {
+func inputArgs(v config.VideoConfig, o CaptureOpts) ([]string, error) {
 	fps := fmt.Sprintf("%d", v.FPS)
 
 	switch v.Source {
 	case config.SourceScreenDDAGrab:
 		// ddagrab 是 lavfi 源滤镜,不是设备。
 		// 它输出 d3d11 硬件帧,可直接零拷贝进 NVENC。
-		return []string{
-			"-f", "lavfi",
-			"-i", fmt.Sprintf("ddagrab=framerate=%d", v.FPS),
-		}, nil
+		//
+		// 不画光标也仍然维持帧率:ddagrab 的 dup_frames 默认为 true
+		// (画面没更新时重复上一帧),外面还有 -fps_mode cfr 兜底。
+		// 附带好处是纯指针移动时画面不变,那些重复帧几乎不占码率。
+		f := fmt.Sprintf("ddagrab=framerate=%d", v.FPS)
+		if !o.DrawMouse {
+			f += ":draw_mouse=0"
+		}
+		return []string{"-f", "lavfi", "-i", f}, nil
 
 	case config.SourceScreenGDI:
-		return []string{
-			"-f", "gdigrab",
-			"-framerate", fps,
-			"-i", "desktop",
-		}, nil
+		args := []string{"-f", "gdigrab", "-framerate", fps}
+		if !o.DrawMouse {
+			// 必须是 -i 之前的输入选项 —— 它不是滤镜,放进 -vf 会被拒绝。
+			args = append(args, "-draw_mouse", "0")
+		}
+		return append(args, "-i", "desktop"), nil
 
+	// 下面两种源**不理会** o.DrawMouse,光标一律画。
+	//
+	// 不是漏了:这两种源都不支持远程控制(见 SupportsRemote),而
+	// CaptureOptsFor 正是按它推的 —— 走正常路径到不了这里时 DrawMouse
+	// 必定为 true。真收到 false 只可能是调用方绕过了 CaptureOptsFor。
 	case config.SourceWindow:
 		if v.WindowTitle == "" {
 			return nil, fmt.Errorf("窗口采集需要填写窗口标题")

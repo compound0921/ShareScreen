@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,6 +159,7 @@ type fakeSvc struct {
 	externalIP string
 	mappings   map[string]Mapping
 	addErr     error
+	delErr     error // 模拟删除失败(路由器断连、超时)
 	added      []string
 	deleted    []string
 }
@@ -187,6 +189,9 @@ func (f *fakeSvc) AddPortMappingCtx(_ context.Context, _ string, extPort uint16,
 }
 
 func (f *fakeSvc) DeletePortMappingCtx(_ context.Context, _ string, extPort uint16, proto string) error {
+	if f.delErr != nil {
+		return f.delErr
+	}
 	k := key(proto, extPort)
 	delete(f.mappings, k)
 	f.deleted = append(f.deleted, k)
@@ -489,5 +494,232 @@ func TestSnapshotCopiesRules(t *testing.T) {
 
 	if m.Snapshot().Rules[0].Port != 8889 {
 		t.Error("改快照返回值影响到了内部状态,说明没有复制")
+	}
+}
+
+// ---------- 规则被移除时的撤销 ----------
+//
+// 这一组盯的是"远控端口和 UPnP 同步"的另一半:端口进了规则要建,
+// 从规则里消失也要撤。少了撤销那一半,关掉远控之后 TCP 8090 会一直
+// 留在路由器上对着公网开着,直到租约到期 —— 而租约是路由器给的。
+
+// 远控关掉之后,它在路由器上的映射必须被撤掉。
+func TestSyncDeletesRemovedRule(t *testing.T) {
+	svc := newFake("203.0.113.7")
+	gw := fakeGateway(svc)
+
+	m := newIdle(Options{
+		InternalIP: "192.168.1.5",
+		Rules:      RulesForWithControl(8889, 8189, 8090),
+		DiscoverFn: func(context.Context, time.Duration) ([]*Gateway, error) {
+			return []*Gateway{gw}, nil
+		},
+	})
+
+	st := &runState{}
+	m.sync(st)
+	if _, ok := svc.mappings[key("TCP", 8090)]; !ok {
+		t.Fatalf("前提不成立:远控端口没建上,实际 %v", svc.mappings)
+	}
+
+	// 用户关掉远控:规则里只剩观看那两条
+	m.Configure(RulesForWithControl(8889, 8189, 0), "192.168.1.5")
+	m.sync(st)
+
+	if _, ok := svc.mappings[key("TCP", 8090)]; ok {
+		t.Errorf("远控关掉之后 TCP 8090 还留在路由器上 —— 这是一个一直对着公网开着的洞。已删:%v",
+			svc.deleted)
+	}
+	// 观看那两条不能被牵连
+	if _, ok := svc.mappings[key("TCP", 8889)]; !ok {
+		t.Error("观看端口的映射不该跟着被删掉")
+	}
+	if _, ok := svc.mappings[key("UDP", 8189)]; !ok {
+		t.Error("媒体端口的映射不该跟着被删掉")
+	}
+}
+
+// 关掉又马上打开,映射不能被自己撤掉。
+//
+// Configure 在远控开关上会被连着调两次(关一次、开一次),中间后台协程
+// 可能一轮都没跑。待删队列不认"又加回来了",结果就是刚建好就删掉。
+func TestConfigureCancelsDeleteWhenRuleComesBack(t *testing.T) {
+	svc := newFake("203.0.113.7")
+	gw := fakeGateway(svc)
+
+	m := newIdle(Options{
+		InternalIP: "192.168.1.5",
+		Rules:      RulesForWithControl(8889, 8189, 8090),
+		DiscoverFn: func(context.Context, time.Duration) ([]*Gateway, error) {
+			return []*Gateway{gw}, nil
+		},
+	})
+
+	st := &runState{}
+	m.sync(st)
+
+	m.Configure(RulesForWithControl(8889, 8189, 0), "192.168.1.5")    // 关掉远控
+	m.Configure(RulesForWithControl(8889, 8189, 8090), "192.168.1.5") // 又打开
+
+	m.sync(st)
+
+	if _, ok := svc.mappings[key("TCP", 8090)]; !ok {
+		t.Errorf("关掉又打开之后映射被自己撤掉了。已删:%v", svc.deleted)
+	}
+}
+
+// 撤销失败要重试,不能把那个洞忘了。
+func TestDeleteRemovedRetriesOnFailure(t *testing.T) {
+	svc := newFake("203.0.113.7")
+	gw := fakeGateway(svc)
+
+	m := newIdle(Options{
+		InternalIP: "192.168.1.5",
+		Rules:      RulesForWithControl(8889, 8189, 8090),
+		DiscoverFn: func(context.Context, time.Duration) ([]*Gateway, error) {
+			return []*Gateway{gw}, nil
+		},
+	})
+
+	st := &runState{}
+	m.sync(st)
+
+	// 关掉远控,但这一轮路由器断连,删不掉
+	svc.delErr = fmt.Errorf("连接被重置")
+	m.Configure(RulesForWithControl(8889, 8189, 0), "192.168.1.5")
+	m.sync(st)
+
+	if _, ok := svc.mappings[key("TCP", 8090)]; !ok {
+		t.Fatal("前提不成立:删除应该失败,条目还该在")
+	}
+
+	// 路由器恢复。下一轮必须把它补删掉,而不是当没这回事
+	svc.delErr = nil
+	m.sync(st)
+
+	if _, ok := svc.mappings[key("TCP", 8090)]; ok {
+		t.Errorf("上一轮删失败之后没有重试,TCP 8090 永远留在路由器上了。已删:%v", svc.deleted)
+	}
+}
+
+// 改远控端口:旧端口的映射要撤掉,新端口要建上。
+func TestSyncFollowsRemoteControlPortChange(t *testing.T) {
+	svc := newFake("203.0.113.7")
+	gw := fakeGateway(svc)
+
+	m := newIdle(Options{
+		InternalIP: "192.168.1.5",
+		Rules:      RulesForWithControl(8889, 8189, 8090),
+		DiscoverFn: func(context.Context, time.Duration) ([]*Gateway, error) {
+			return []*Gateway{gw}, nil
+		},
+	})
+
+	st := &runState{}
+	m.sync(st)
+
+	m.Configure(RulesForWithControl(8889, 8189, 8091), "192.168.1.5")
+	m.sync(st)
+
+	if _, ok := svc.mappings[key("TCP", 8090)]; ok {
+		t.Error("改了远控端口之后,旧端口的映射还留在路由器上")
+	}
+	if _, ok := svc.mappings[key("TCP", 8091)]; !ok {
+		t.Error("新的远控端口没建上")
+	}
+}
+
+// 提示语里的端口必须按实际规则生成,不能写死前两条。
+//
+// 远控端口只在远控开着时才是第三条规则。提示漏掉它的后果是:
+// 用户照着一份看起来完整的说明放行完防火墙,然后面对"公网上能看画面、
+// 但控制不了" —— 而没有任何地方告诉他少了什么。
+func TestPortList(t *testing.T) {
+	tests := []struct {
+		name  string
+		rules []Rule
+		want  string
+	}{
+		{"远控关着 —— 两条", RulesFor(8889, 8189), "8889/tcp 和 8189/udp"},
+		{"远控开着 —— 三条", RulesForWithControl(8889, 8189, 8090), "8889/tcp、8189/udp 和 8090/tcp"},
+		{"一条", RulesFor(8889, 0)[:1], "8889/tcp"},
+		{"没有规则", nil, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := portList(tc.rules); got != tc.want {
+				t.Errorf("portList = %q,想要 %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// 失败路径的手动配置提示要提到远控端口,条数也要对。
+func TestManualHintMentionsRemoteControlPort(t *testing.T) {
+	rules := RulesForWithControl(8889, 8189, 8090)
+	got := manualHint("路由器返回错误码 402", rules)
+
+	if !strings.Contains(got, "8090") {
+		t.Errorf("提示里没有远控端口:%q", got)
+	}
+	if !strings.Contains(got, "3 条") {
+		t.Errorf("提示里的条数不是规则条数:%q", got)
+	}
+}
+
+// 成功路径的防火墙提示同样要提到远控端口。
+func TestActiveHintMentionsRemoteControlPort(t *testing.T) {
+	svc := newFake("203.0.113.7")
+	gw := fakeGateway(svc)
+
+	m := newIdle(Options{
+		InternalIP: "192.168.1.5",
+		Rules:      RulesForWithControl(8889, 8189, 8090),
+		DiscoverFn: func(context.Context, time.Duration) ([]*Gateway, error) {
+			return []*Gateway{gw}, nil
+		},
+	})
+
+	m.sync(&runState{})
+	snap := m.Snapshot()
+	if snap.State != StateActive {
+		t.Fatalf("状态 = %s,想要 active(消息:%s)", snap.State, snap.Message)
+	}
+	if !strings.Contains(snap.Hint, "8090") {
+		t.Errorf("防火墙提示里没有远控端口:%q", snap.Hint)
+	}
+}
+
+// "自动映射已生效"那一行必须列全所有端口。
+//
+// 它是界面上唯一说明"自动映射都开了什么"的地方。只写观看端口的话,远控
+// 开着时用户无法从界面确认远控端口到底开没开 —— 而这一行的语气是"生效了",
+// 很容易被当成"全都好了"。
+func TestActiveMessageListsAllPorts(t *testing.T) {
+	svc := newFake("203.0.113.7")
+	gw := fakeGateway(svc)
+
+	m := newIdle(Options{
+		InternalIP: "192.168.1.5",
+		Rules:      RulesForWithControl(8889, 8189, 8090),
+		DiscoverFn: func(context.Context, time.Duration) ([]*Gateway, error) {
+			return []*Gateway{gw}, nil
+		},
+	})
+
+	m.sync(&runState{})
+	snap := m.Snapshot()
+	if snap.State != StateActive {
+		t.Fatalf("状态 = %s,想要 active(消息:%s)", snap.State, snap.Message)
+	}
+
+	for _, want := range []string{"8889/tcp", "8189/udp", "8090/tcp"} {
+		if !strings.Contains(snap.Message, want) {
+			t.Errorf("成功提示里没有 %s:%q", want, snap.Message)
+		}
+	}
+	// 外网地址仍然要带上观看端口 —— 那是用户直接拿去用的那个地址
+	if !strings.Contains(snap.Message, "203.0.113.7:8889") {
+		t.Errorf("成功提示里没有外网地址:%q", snap.Message)
 	}
 }

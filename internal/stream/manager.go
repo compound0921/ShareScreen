@@ -392,7 +392,9 @@ func (m *Manager) startOnce(enc ffmpeg.Encoder) error {
 	}
 
 	target := fmt.Sprintf("rtsp://127.0.0.1:%d/%s", cfg.RTSPPort, cfg.StreamPath)
-	args, err := ffmpeg.BuildArgs(cfg.Video, audioIn, enc, target, screenW, screenH)
+	// 远控开着时不画主机光标,见 ffmpeg.CaptureOptsFor。
+	opts := ffmpeg.CaptureOptsFor(cfg.Video, cfg.RemoteControl.Enabled)
+	args, err := ffmpeg.BuildArgs(cfg.Video, opts, audioIn, enc, target, screenW, screenH)
 	if err != nil {
 		m.stopAudio()
 		return err
