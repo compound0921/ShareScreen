@@ -110,9 +110,12 @@
 
     <div class="field">
       <label for="publicHost">公网地址(可选)</label>
-      <input type="text" id="publicHost" placeholder="例如 example.com:8443">
+      <input type="text" id="publicHost" placeholder="例如 example.com">
       <p class="hint">
-        格式「IP 或域名[:端口]」。<strong>不填则公网观众看不到画面。</strong>
+        填<strong>主机</strong>就行(公网 IP 或域名),<strong>不用写端口</strong> ——
+        链接里会自动带上。只有你在路由器上做过端口翻译(外网 8443 → 内网 8889)
+        时才需要写成 <code>域名:8443</code>。
+        <strong>不填则公网观众看不到画面。</strong>
       </p>
     </div>
 

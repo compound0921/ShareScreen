@@ -169,12 +169,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// noteHostMismatch 在"自动映射开的端口"和"公网地址里写的端口"对不上时出声。
+// noteHostMismatch 在"公网地址"和实际能通的那个地址对不上时出声。
 //
-// 自动映射按内外端口一致的原则开 WebRTCPort,而用户手填的公网地址可能写了
-// 别的端口(比如照着手动部署文档写的 8443)。两边对不上时,映射本身是成功的、
-// 状态灯也是绿的,但链接就是打不开 —— 这种"每一步看着都对"的故障最难查,
-// 所以宁可在这里把话说明白。
+// 自动映射成功、状态灯是绿的,但链接就是打不开 —— 这种"每一步看着都对"的
+// 故障最难查,所以宁可在这里把话说明白。三种对不上:
+//
+//  1. **填的 IP 不是本机当前的公网 IP。** 最隐蔽的一种:家宽的 IP 会变,而
+//     手动填进去的地址程序不会去改(见 config.CanAutoSetPublicHost),于是
+//     它会一直错下去,而界面上没有任何地方说这件事。实测踩到过:配置里写着
+//     112.226.166.178,路由器报告的却是 112.254.141.83,公网链接对所有人都
+//     打不开,但状态灯一直是绿的。
+//  2. **填的端口和自动映射开的不是一个**(比如照手动部署文档写了 8443)。
+//  3. **压根没写端口** —— 链接会按 80 拼,而映射开在别的端口上。
+//
+// 只警告,不改用户的输入:DDNS 域名那种情况地址本来就不该跟着 IP 变,程序
+// 无权替用户决定。所以这里只把"现在这样是打不开的"讲清楚,并给出改法。
 //
 // 改动的是传进来的副本,不是 Mapper 内部的状态。
 func noteHostMismatch(cfg config.Config, snap *portmap.Snapshot) {
@@ -182,9 +191,26 @@ func noteHostMismatch(cfg config.Config, snap *portmap.Snapshot) {
 		return
 	}
 
+	host := hostOnly(cfg.PublicHost)
+
+	// 填的是 IP 字面量、而且和路由器报的外网地址不同。
+	//
+	// 域名不参与这个判断 —— DDNS 域名本来就该和当前 IP 不一样,那正是它
+	// 存在的意义。
+	if ip := net.ParseIP(host); ip != nil && snap.ExternalIP != "" && ip.String() != snap.ExternalIP {
+		snap.Hint = fmt.Sprintf(
+			"公网地址填的是 %s,而路由器报告的外网地址是 %s —— 这个链接打不开。"+
+				"家宽的 IP 会变,把手填的地址清空、让程序自己填(它拿到的就是当前地址)。",
+			ip, snap.ExternalIP)
+		return
+	}
+
+	// 没写端口是**正常情况**:链接的端口由 publicWatchHost 补上,用户不必管。
+	// (以前这里会警告"链接会走 80" —— 那是因为当时地址是原样拼进 URL 的。
+	// 改成程序负责补端口之后,那条警告就不再成立了。)
 	_, port, err := net.SplitHostPort(cfg.PublicHost)
 	if err != nil {
-		return // 没写端口,那走的是 80,不参与这个判断
+		return
 	}
 	if port == strconv.Itoa(cfg.WebRTCPort) {
 		return
@@ -194,7 +220,24 @@ func noteHostMismatch(cfg config.Config, snap *portmap.Snapshot) {
 		"公网地址里写的是 %s 端口,而自动映射开的是 %d —— 两者对不上,链接打不开。"+
 			"把公网地址改成 %s,或者清空它让程序自己填。",
 		port, cfg.WebRTCPort,
-		net.JoinHostPort(hostOnly(cfg.PublicHost), strconv.Itoa(cfg.WebRTCPort)))
+		net.JoinHostPort(host, strconv.Itoa(cfg.WebRTCPort)))
+}
+
+// publicWatchHost 返回公网观看链接里该用的「主机:端口」。
+//
+// **端口不归「公网地址」这个字段负责。** 绝大多数部署(自动映射)下外网端口
+// 就是 WebRTCPort,让用户再抄一遍既多余又容易抄错 —— 实测就有人填了 IP 忘了
+// 端口,链接按 80 拼出来,而界面上看不出任何问题:状态是绿的、地址也在,
+// 就是打不开。现在地址怎么拼由程序负责,用户只管填"这台机器在公网上叫什么"。
+//
+// 仍然允许写端口:手动部署时外网端口可能被翻译过(文档里的 8443 → 8889),
+// 那种情况内外端口本来就不一样,程序猜不出来,只能由用户写。写了就用他写的。
+func publicWatchHost(cfg config.Config) string {
+	host := hostOnly(cfg.PublicHost)
+	if _, port, err := net.SplitHostPort(cfg.PublicHost); err == nil && port != "" {
+		return net.JoinHostPort(host, port)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(cfg.WebRTCPort))
 }
 
 // hostOnly 去掉主机串里的端口部分。
@@ -326,7 +369,9 @@ func (s *Server) ApplyAutoPublicHost(externalIP string) {
 		return
 	}
 
-	host := net.JoinHostPort(externalIP, strconv.Itoa(old.WebRTCPort))
+	// 只写主机,不带端口 —— 端口由 publicWatchHost 在拼链接时补。
+	// 这个字段的职责就一条:"这台机器在公网上叫什么"。
+	host := externalIP
 	if old.PublicHost == host && old.PublicHostAuto {
 		return // 没变,不必白重启一次 MediaMTX
 	}
@@ -484,11 +529,11 @@ func (s *Server) watchURLs(cfg config.Config) []watchURL {
 			Kind:  "lan",
 		})
 	}
-	// PublicHost 允许带端口,例如 example.com:8443
+	// 端口由 publicWatchHost 补,不要求用户写进地址里
 	if cfg.PublicHost != "" {
 		out = append(out, watchURL{
 			Label: "公网",
-			URL:   fmt.Sprintf("http://%s/%s/%s", cfg.PublicHost, cfg.StreamPath, playQuery),
+			URL:   fmt.Sprintf("http://%s/%s/%s", publicWatchHost(cfg), cfg.StreamPath, playQuery),
 			Kind:  "public",
 		})
 	}
