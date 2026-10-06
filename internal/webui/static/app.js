@@ -17,6 +17,8 @@ const els = {
   audioField: $('audioField'),
   audioEnabled: $('audioEnabled'),
   audioBitrate: $('audioBitrate'),
+  audioDeviceField: $('audioDeviceField'),
+  audioDevice: $('audioDevice'),
   resolution: $('resolution'),
   fps: $('fps'),
   bitrate: $('bitrate'),
@@ -72,8 +74,8 @@ let saveTimer = null;
 
 // ── 工具 ──
 const SOURCE_HINT = {
-  screen_ddagrab: 'CPU 占用最低,支持 60fps。不支持单窗口。',
-  screen_gdigrab: '通用兜底,帧率明显更低。',
+  screen_gdigrab: '通用,任何机器上都能出画面。CPU 占用高于 GPU 采集。',
+  screen_ddagrab: 'GPU 采集,CPU 占用最低,支持 60fps。个别显卡/驱动上可能抓不到画面。',
   window: '窗口被遮挡时,画面会被遮挡物盖住。',
   obs: '需先在 OBS 里启动虚拟摄像头。声音仍来自桌面音频。',
   obs_push: '画面和声音都由 OBS 提供,参数也在 OBS 里设。',
@@ -201,9 +203,61 @@ function renderSourceFields() {
   }
 }
 
-// renderAudioFields 只在勾了音频时才显示码率 —— 没开音频时它没有意义。
+// renderAudioFields 只在勾了音频时才显示码率和设备 —— 没开音频时它们没意义。
 function renderAudioFields() {
-  els.audioBitrate.hidden = !els.audioEnabled.checked;
+  const on = els.audioEnabled.checked;
+  els.audioBitrate.hidden = !on;
+  els.audioDeviceField.hidden = !on;
+  if (on) {
+    loadAudioDevices();
+  }
+}
+
+// loadAudioDevices 拉取可选播放设备填进下拉框。
+//
+// 名字和 ID 都从后端来,前端不拼不猜 —— 设备是插拔型的,任何缓存都会
+// 让用户选到一台已经不在了的设备。
+async function loadAudioDevices() {
+  let list = [];
+  try {
+    list = await api('/api/audio/devices');
+  } catch {
+    // 拿不到列表(非 Windows 平台之类)就只留"跟随默认设备"那一项,
+    // 而不是把整个音频设置卡住。
+    list = [];
+  }
+
+  // 以当前下拉框里的值为准,其次才是配置里存的 —— 重新枚举时不能把用户
+  // 刚选中、还没来得及保存的那一项顶掉。
+  const saved = els.audioDevice.value ||
+    (config && config.audio && config.audio.deviceId) || '';
+  els.audioDevice.innerHTML = '';
+
+  const addOption = (value, text) => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = text;
+    els.audioDevice.appendChild(opt);
+  };
+
+  addOption('', '系统默认设备(自动跟随)');
+
+  let found = false;
+  for (const d of list) {
+    // 默认设备在下面也会列出来,标一下,免得用户以为"默认"是个具体型号
+    addOption(d.id, d.name + (d.default ? '(当前默认)' : ''));
+    if (d.id === saved) found = true;
+  }
+
+  // 配置里指定的设备现在枚举不到 —— 拔了、或者换了台机器带过来的配置。
+  // 补一个条目把它显示出来,否则下拉框会静默跳到"默认设备"上,
+  // 用户既不知道原来选的是什么,也不知道为什么没生效。
+  if (saved && !found) {
+    addOption(saved, '已选设备(当前不可用)');
+  }
+
+  els.audioDevice.value = saved;
+  els.audioDevice.disabled = list.length === 0 && !saved;
 }
 
 // copyText 把文本写进剪贴板并短暂改变按钮文案作为反馈。
@@ -426,6 +480,7 @@ function collectAudio() {
   return {
     enabled: els.audioEnabled.checked,
     bitrateKbps: Number(els.audioBitrate.value) || 96,
+    deviceId: els.audioDevice.value,
   };
 }
 
@@ -770,7 +825,7 @@ async function init() {
   });
 
   for (const el of [els.resolution, els.fps, els.bitrate, els.encoder,
-                    els.audioBitrate, els.publicHost]) {
+                    els.audioBitrate, els.audioDevice, els.publicHost]) {
     el.addEventListener('change', scheduleSave);
   }
 

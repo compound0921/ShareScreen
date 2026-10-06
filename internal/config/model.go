@@ -7,9 +7,11 @@ import "sharescreen/internal/mediamtx"
 type SourceType string
 
 const (
-	// 屏幕,走 ddagrab(DXGI Desktop Duplication)。性能最好,但不支持单窗口。
+	// 屏幕,走 ddagrab(DXGI Desktop Duplication)。性能最好,但不支持单窗口,
+	// 而且依赖驱动和显卡,个别机器上抓不到画面。
 	SourceScreenDDAGrab SourceType = "screen_ddagrab"
-	// 屏幕,走 gdigrab。兼容性兜底。
+	// 屏幕,走 gdigrab。**默认源** —— 性能不如 ddagrab,但它对硬件没有要求,
+	// 任何一台 Windows 上都能出画面。默认值要的是"一定能用",不是"最快"。
 	SourceScreenGDI SourceType = "screen_gdigrab"
 	// 单个窗口 —— 只能用 gdigrab,ddagrab 不支持。
 	SourceWindow SourceType = "window"
@@ -64,9 +66,17 @@ type VideoConfig struct {
 // ffmpeg 拿不到桌面音频。采集到的是设备原始 PCM,由 ffmpeg 编码成 Opus ——
 // 只有 Opus 能被浏览器 WebRTC 直接播放。
 type AudioConfig struct {
-	// Enabled 打开后用默认播放设备的声音。采的是"你听到什么",
+	// Enabled 打开后采集播放设备的声音。采的是"你听到什么",
 	// 换耳机、切 HDMI、插蓝牙都会自动跟随,不需要改系统设置。
 	Enabled bool `json:"enabled"`
+
+	// DeviceID 指定采哪台播放设备的回环;空串表示跟随系统默认设备。
+	//
+	// 留这个口子是因为**系统默认设备不一定是有声音的那一台**:笔记本接了
+	// HDMI 之后,系统默认常常指到显示器那路输出,而声音其实还从笔记本自己的
+	// 扬声器出来 —— 这时采默认设备只能采到静音,观众那边就是"有画面没声音"。
+	// 程序没法知道声音到底从哪台设备出来,只能让用户指定。
+	DeviceID string `json:"deviceId,omitempty"`
 
 	// BitrateKbps 是 Opus 的输出码率。音频码率本身很低,
 	// 96k 立体声已经接近透明,再往上加听不出区别。
@@ -144,14 +154,21 @@ type Config struct {
 
 // Default 返回默认配置。
 //
-// 默认不缩放(Width/Height 为 0)。这是实测结论:原生分辨率零拷贝既避开
-// 了 2 倍放大的模糊,又省掉一次 983 MB/s 的 CPU 拷贝,而且 H.264 对静止
-// 区域的编码几乎不耗码率,分辨率提高并不显著增加带宽占用。
+// 默认采集源是 gdigrab 而不是更快的 ddagrab:ddagrab 依赖 DXGI Desktop
+// Duplication,在部分显卡/驱动/远程桌面会话下会直接抓不到画面 —— 而默认值
+// 一旦抓不到画面,用户看到的是"这个程序坏了",不是"我该换个采集源"。
+// 宁可默认慢一点,也要保证任何机器上点开始就有画面;要性能的自己去选
+// 「屏幕(GPU 采集)」。
+//
+// 默认不缩放(Width/Height 为 0)。这是实测结论:原生分辨率既避开了 2 倍
+// 放大的模糊,又省掉了缩放本身的开销(ddagrab 下还意味着不用 hwdownload,
+// 省一次 983 MB/s 的 CPU 拷贝),而且 H.264 对静止区域的编码几乎不耗码率,
+// 分辨率提高并不显著增加带宽占用。
 func Default() Config {
 	o := mediamtx.DefaultOptions()
 	return Config{
 		Video: VideoConfig{
-			Source:      SourceScreenDDAGrab,
+			Source:      SourceScreenGDI,
 			Width:       0,
 			Height:      0,
 			FPS:         60,

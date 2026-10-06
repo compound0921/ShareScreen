@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"sharescreen/internal/audio"
 	"sharescreen/internal/config"
 	"sharescreen/internal/ffmpeg"
 	"sharescreen/internal/portmap"
@@ -424,6 +425,28 @@ func (s *Server) handleWindows(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
+// handleAudioDevices 返回可选的播放设备列表,供界面上的设备下拉框使用。
+//
+// 和窗口列表一样按需枚举:用户随时会插拔耳机、切 HDMI,缓存下来只会让他
+// 选到一台已经不存在的设备。枚举是毫秒级的。
+func (s *Server) handleAudioDevices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	list, err := audio.ListDevices()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "枚举播放设备失败: " + err.Error(),
+		})
+		return
+	}
+	if list == nil {
+		list = []audio.Device{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
 func (s *Server) handleEncoders(w http.ResponseWriter, r *http.Request) {
 	encoders := s.encoders
 	if encoders == nil {
@@ -484,9 +507,12 @@ func (s *Server) watchURLs(cfg config.Config) []watchURL {
 // audioChanged 报告音频参数是否有实质差异。
 //
 // 开关变化要重启 —— 开了才走 WASAPI 采集那条路。码率变化同样要重启,
-// 因为它是 ffmpeg 的输出参数。
+// 因为它是 ffmpeg 的输出参数。换设备也必须重启:设备是在启动时才打开的,
+// 不重启的话用户在下拉框里换了一台,采的还是原来那台 —— 静默不生效。
 func audioChanged(a, b config.AudioConfig) bool {
-	return a.Enabled != b.Enabled || a.BitrateKbps != b.BitrateKbps
+	return a.Enabled != b.Enabled ||
+		a.BitrateKbps != b.BitrateKbps ||
+		a.DeviceID != b.DeviceID
 }
 
 // videoChanged 报告两套推流参数是否有实质差异 —— 有差异就需要重启 ffmpeg。

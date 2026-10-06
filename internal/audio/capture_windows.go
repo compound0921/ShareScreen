@@ -29,13 +29,31 @@ type guid struct {
 	data4 [8]byte
 }
 
+// propertyKey 对应 Win32 的 PROPERTYKEY:GUID + 属性号。
+//
+// 布局正好是 16 + 4 = 20 字节,和 C 里一致 —— 字段都是对齐的,
+// 不会像 WAVEFORMATEX 那样被 Go 补出多余的字节(见下面的偏移注释)。
+type propertyKey struct {
+	fmtid guid
+	pid   uint32
+}
+
 var (
 	// CLSID_MMDeviceEnumerator —— 音频设备枚举器的入口。
 	clsidMMDeviceEnumerator = guid{0xBCDE0395, 0xE52F, 0x467C, [8]byte{0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}}
 	iidMMDeviceEnumerator   = guid{0xA95664D2, 0x9614, 0x4F35, [8]byte{0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}}
+	iidMMDeviceCollection   = guid{0x0BD7A1BE, 0x7A1A, 0x44DB, [8]byte{0x83, 0x97, 0xCC, 0x53, 0x92, 0x38, 0x7B, 0x5E}}
 	iidMMDevice             = guid{0xD666063F, 0x1587, 0x4E43, [8]byte{0x81, 0xF1, 0xB9, 0x48, 0xE8, 0x07, 0x36, 0x3F}}
 	iidAudioClient          = guid{0x1CB9AD4C, 0xDBFA, 0x4C32, [8]byte{0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2}}
 	iidAudioCaptureClient   = guid{0xC8ADBD64, 0xE71E, 0x48A0, [8]byte{0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17}}
+	iidPropertyStore        = guid{0x886D8EEB, 0x8CF2, 0x4446, [8]byte{0x8D, 0x02, 0xCD, 0xBA, 0x1D, 0xBD, 0xCF, 0x99}}
+
+	// PKEY_Device_FriendlyName —— 端点属性里那个给人看的名字,
+	// 形如 "扬声器 (Realtek(R) Audio)"。
+	pkeyDeviceFriendlyName = propertyKey{
+		fmtid: guid{0xA45C254E, 0xDF1C, 0x4EFD, [8]byte{0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0}},
+		pid:   14,
+	}
 
 	// WAVEFORMATEXTENSIBLE 里用来区分整数 PCM 和浮点的子格式。
 	subFormatPCM       = guid{0x00000001, 0x0000, 0x0010, [8]byte{0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}}
@@ -49,6 +67,15 @@ const (
 	// eRender(播放设备)和 eConsole(控制台角色,即"默认设备")。
 	endpointRender  = 0
 	endpointConsole = 0
+
+	// EnumAudioEndpoints 的状态掩码:只要当前插着、能用的设备。
+	deviceStateActive = 0x00000001
+
+	// IPropertyStore 的打开模式。只读就够。
+	stgmRead = 0
+
+	// PROPVARIANT 的类型码。这个属性只可能是字符串。
+	vtLPWSTR = 31
 
 	// IAudioClient::Initialize 的共享模式。回环采集只能用共享模式。
 	shareModeShared = 0
@@ -67,6 +94,9 @@ var (
 	procCoInitializeEx   = ole32.NewProc("CoInitializeEx")
 	procCoCreateInstance = ole32.NewProc("CoCreateInstance")
 	procCoTaskMemFree    = ole32.NewProc("CoTaskMemFree")
+	// PropVariantClear 负责释放 PROPVARIANT 里的字符串 —— 那是设备属性
+	// 系统按 COM 的规矩分配的内存,不释放就是每次枚举泄漏一点。
+	procPropVariantClear = ole32.NewProc("PropVariantClear")
 )
 
 // hresultError 把 HRESULT 转成带解释的 error。
@@ -236,6 +266,117 @@ func parseFormat(p unsafe.Pointer) (Format, error) {
 	return f, nil
 }
 
+// ── 设备枚举 ──────────────────────────────────────────────────
+
+// ListDevices 返回当前所有可用的播放设备,系统默认的那一台带标记。
+//
+// 界面上那个下拉框用它。枚举是毫秒级的,按需调用即可。
+func ListDevices() ([]Device, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	if err := coInit(); err != nil {
+		return nil, err
+	}
+
+	var enum unsafe.Pointer
+	if err := coCreateInstance(&clsidMMDeviceEnumerator, &iidMMDeviceEnumerator, &enum); err != nil {
+		return nil, fmt.Errorf("初始化音频设备枚举器失败: %w", err)
+	}
+	defer release(enum)
+
+	// IMMDeviceCollection 方法顺序:
+	// 0/1/2 IUnknown / 3 GetCount / 4 Item
+	var coll unsafe.Pointer
+	if err := comCall(enum, 3,
+		endpointRender, deviceStateActive,
+		uintptr(unsafe.Pointer(&coll))); err != nil {
+		return nil, fmt.Errorf("枚举播放设备失败: %w", err)
+	}
+	defer release(coll)
+
+	var n uint32
+	if err := comCall(coll, 3, uintptr(unsafe.Pointer(&n))); err != nil {
+		return nil, fmt.Errorf("读取播放设备数量失败: %w", err)
+	}
+
+	// 先记下系统默认设备的 ID,好在列表里标出来。
+	//
+	// 拿不到不算错 —— 那只是少一个标记,不该让整个下拉框空着。
+	var def unsafe.Pointer
+	defaultID := ""
+	if err := comCall(enum, 4, endpointRender, endpointConsole,
+		uintptr(unsafe.Pointer(&def))); err == nil && def != nil {
+		defaultID = deviceID(def)
+		release(def)
+	}
+
+	out := make([]Device, 0, n)
+	for i := uint32(0); i < n; i++ {
+		var dev unsafe.Pointer
+		if err := comCall(coll, 4, uintptr(i), uintptr(unsafe.Pointer(&dev))); err != nil {
+			continue // 单个设备取不到就跳过,不连累整个列表
+		}
+		id, name := deviceID(dev), deviceName(dev)
+		release(dev)
+
+		if id == "" {
+			continue
+		}
+		if name == "" {
+			name = "未命名设备"
+		}
+		out = append(out, Device{ID: id, Name: name, Default: id == defaultID})
+	}
+	return out, nil
+}
+
+// deviceID 取端点的 ID 字符串(IMMDevice::GetId,下标 5)。
+func deviceID(dev unsafe.Pointer) string {
+	var p *uint16
+	if err := comCall(dev, 5, uintptr(unsafe.Pointer(&p))); err != nil || p == nil {
+		return ""
+	}
+	defer procCoTaskMemFree.Call(uintptr(unsafe.Pointer(p)))
+	return windows.UTF16PtrToString(p)
+}
+
+// deviceName 取端点的人类可读名字。
+//
+// 走属性存储:IMMDevice::OpenPropertyStore(下标 4)→
+// IPropertyStore::GetValue(下标 5)→ PKEY_Device_FriendlyName。
+// 取不到就返回空串,调用方会退化成 ID —— 名字只是给人看的。
+func deviceName(dev unsafe.Pointer) string {
+	var store unsafe.Pointer
+	if err := comCall(dev, 4, stgmRead, uintptr(unsafe.Pointer(&store))); err != nil {
+		return ""
+	}
+	defer release(store)
+
+	// PROPVARIANT 在 x64 上是 24 字节(vt + 3 个保留字 + 8 字节联合体 +
+	// 8 字节指针),这里给到 32 字节留余量。
+	//
+	// 按偏移读而不是映射成 Go 结构体,理由和 WAVEFORMATEX 那边一样:
+	// 联合体的对齐规则很容易差几个字节,而差几个字节不会报错,
+	// 只会读出一个乱七八糟的指针。
+	var pv [32]byte
+	if err := comCall(store, 5,
+		uintptr(unsafe.Pointer(&pkeyDeviceFriendlyName)),
+		uintptr(unsafe.Pointer(&pv[0]))); err != nil {
+		return ""
+	}
+	defer procPropVariantClear.Call(uintptr(unsafe.Pointer(&pv[0])))
+
+	if *(*uint16)(unsafe.Pointer(&pv[0])) != vtLPWSTR {
+		return ""
+	}
+	ptr := *(*unsafe.Pointer)(unsafe.Add(unsafe.Pointer(&pv[0]), 8))
+	if ptr == nil {
+		return ""
+	}
+	return windows.UTF16PtrToString((*uint16)(ptr))
+}
+
 // ── 采集会话 ──────────────────────────────────────────────────
 
 // Capture 是一次桌面音频采集会话。
@@ -250,13 +391,25 @@ type Capture struct {
 	format  Format
 	client  unsafe.Pointer // IAudioClient
 	capture unsafe.Pointer // IAudioCaptureClient
+
+	// 实际打开的是哪台设备。配置里指定的设备可能已经拔了 —— 那时这里
+	// 和配置对不上,调用方据此给用户一条提示。
+	deviceID   string
+	deviceName string
 }
 
 // Open 打开默认播放设备的回环采集。
+func Open() (*Capture, error) { return OpenDevice("") }
+
+// OpenDevice 打开指定播放设备的回环采集;id 为空表示跟随系统默认设备。
+//
+// 指定的设备不存在时(拔了耳机、换了声卡)**回退到默认设备**而不是报错:
+// 宁可出声而设备不是用户点的那台,也好过整个共享没有声音。调用方可以
+// 用 DeviceID 和配置比对,把这次回退告诉用户。
 //
 // 返回时设备已初始化但还没有开始出数据,需要再调 Run。失败时返回的
 // error 已经是给用户看的中文描述。
-func Open() (*Capture, error) {
+func OpenDevice(id string) (*Capture, error) {
 	// 整个函数都在同一个 OS 线程上跑,因为线程一旦迁移,
 	// 上面那次 coInit 就跟这个线程没关系了。
 	runtime.LockOSThread()
@@ -277,10 +430,24 @@ func Open() (*Capture, error) {
 	// 3 EnumAudioEndpoints / 4 GetDefaultAudioEndpoint / 5 GetDevice /
 	// 6 RegisterEndpointNotificationCallback / 7 Unregister...
 	var dev unsafe.Pointer
-	if err := comCall(enum, 4,
-		endpointRender, endpointConsole,
-		uintptr(unsafe.Pointer(&dev))); err != nil {
-		return nil, fmt.Errorf("找不到默认播放设备: %w", err)
+	if id != "" {
+		p, err := windows.UTF16PtrFromString(id)
+		if err == nil {
+			// GetDevice 失败(设备不在了)时 dev 保持为 nil,下面走默认设备。
+			if err := comCall(enum, 5,
+				uintptr(unsafe.Pointer(p)),
+				uintptr(unsafe.Pointer(&dev))); err != nil {
+				dev = nil
+			}
+			runtime.KeepAlive(p)
+		}
+	}
+	if dev == nil {
+		if err := comCall(enum, 4,
+			endpointRender, endpointConsole,
+			uintptr(unsafe.Pointer(&dev))); err != nil {
+			return nil, fmt.Errorf("找不到默认播放设备: %w", err)
+		}
 	}
 	defer release(dev)
 
@@ -295,7 +462,13 @@ func Open() (*Capture, error) {
 		return nil, fmt.Errorf("打开音频客户端失败: %w", err)
 	}
 
-	c := &Capture{client: client}
+	// 记下实际打开的是哪台设备。取值失败不影响采集 —— 那只是让上面那条
+	// "你选的设备不在了"的提示少一个名字。
+	c := &Capture{
+		client:     client,
+		deviceID:   deviceID(dev),
+		deviceName: deviceName(dev),
+	}
 	opened := false
 	defer func() {
 		if !opened {
@@ -348,6 +521,12 @@ func Open() (*Capture, error) {
 
 // Format 返回设备的原始 PCM 格式。必须在 Open 之后、构造 ffmpeg 参数之前读。
 func (c *Capture) Format() Format { return c.format }
+
+// DeviceID 返回实际打开的播放设备 ID。
+func (c *Capture) DeviceID() string { return c.deviceID }
+
+// DeviceName 返回实际打开的播放设备名;取不到名字时可能为空。
+func (c *Capture) DeviceName() string { return c.deviceName }
 
 // Close 释放 COM 对象。可以在任意 MTA 线程上调用。
 func (c *Capture) Close() {

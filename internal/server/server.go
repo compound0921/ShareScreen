@@ -143,6 +143,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/presets", s.handlePresets)
 	mux.HandleFunc("/api/encoders", s.handleEncoders)
 	mux.HandleFunc("/api/windows", s.handleWindows)
+	mux.HandleFunc("/api/audio/devices", s.handleAudioDevices)
 	mux.HandleFunc("/api/portmap/retry", s.handlePortMapRetry)
 
 	mux.HandleFunc("/api/rc/enable", s.handleRCEnable)

@@ -299,6 +299,8 @@ OBS 设备名:      OBS Virtual Camera
 OBS 替代名:      @device_sw_{860BB310-5D01-11D0-BD3B-00A0C911CE86}\{A3FCE0F5-3493-419F-958A-ABA1250EC20B}
 
 采集方式:        ddagrab(首选)/ gdigrab(兜底)
+                 ↑ 这是 Stage 0 当时的取舍;后来程序改成默认 gdigrab(见
+                   架构设计 §5.1),因为默认值要的是"一定能出画面"
 gdigrab 30fps 实测:  25fps,drop=19  ← 不可用
 ddagrab 30fps 实测:  29–30fps,drop=1
 ddagrab 60fps 实测:  60.0fps(需 -fps_mode cfr),drop=0

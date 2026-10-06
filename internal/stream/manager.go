@@ -533,10 +533,22 @@ func (m *Manager) markFailed(err error) {
 // ffmpeg 的 stdin 已经被 'q' 优雅退出占着,而 Windows 的 exec 又传不了额外的
 // 文件描述符,所以回环 TCP 是最省事的一条路。
 func (m *Manager) startAudio(cfg config.Config) *ffmpeg.AudioInput {
-	cap, err := audio.Open()
+	cap, err := audio.OpenDevice(cfg.Audio.DeviceID)
 	if err != nil {
 		m.setWarning("桌面音频不可用,已按无声共享:" + err.Error())
 		return nil
+	}
+
+	// 用户指定的设备不在了(拔了耳机、换了声卡)—— 打开时已经退回到默认
+	// 设备。出声比"设备对得上"重要,但这件事得说出来:否则用户会以为
+	// 自己选的那台正在被采,而那台可能根本没在放声音。
+	fallbackWarn := ""
+	if cfg.Audio.DeviceID != "" && cap.DeviceID() != cfg.Audio.DeviceID {
+		name := cap.DeviceName()
+		if name == "" {
+			name = "默认设备" // 名字取不到时别把句子断在半截
+		}
+		fallbackWarn = "选定的音频设备已不可用,改用系统" + name + "。"
 	}
 
 	// 端口交给系统挑,避免和别的程序撞车。
@@ -559,7 +571,13 @@ func (m *Manager) startAudio(cfg config.Config) *ffmpeg.AudioInput {
 
 	go m.runAudio(ctx, cap, ln, done)
 
-	m.clearWarning()
+	// 上一条"设备被换掉了"的警告到这里才清 —— 换设备成功了它就该消失,
+	// 但这次回退产生的警告不能被自己抹掉。
+	if fallbackWarn != "" {
+		m.setWarning(fallbackWarn)
+	} else {
+		m.clearWarning()
+	}
 
 	f := cap.Format()
 	return &ffmpeg.AudioInput{

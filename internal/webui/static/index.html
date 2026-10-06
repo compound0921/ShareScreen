@@ -22,8 +22,8 @@
     <div class="field">
       <label for="source">采集源</label>
       <select id="source">
-        <option value="screen_ddagrab">屏幕(推荐,GPU 采集)</option>
-        <option value="screen_gdigrab">屏幕(兼容模式)</option>
+        <option value="screen_gdigrab">屏幕(推荐,兼容性最好)</option>
+        <option value="screen_ddagrab">屏幕(GPU 采集,更快)</option>
         <option value="window">单个窗口</option>
         <option value="obs">OBS 虚拟摄像头(只有画面)</option>
         <option value="obs_push">OBS 直推(含音频)</option>
@@ -90,7 +90,15 @@
         <option value="128">128 kbps</option>
         <option value="192">192 kbps</option>
       </select>
-      <p class="hint">换耳机、切 HDMI 都会自动跟随。</p>
+      <div id="audioDeviceField">
+        <label for="audioDevice" class="gap-top">采集哪台设备的声音</label>
+        <select id="audioDevice"></select>
+        <p class="hint">
+          默认跟随系统默认播放设备。<strong>接了 HDMI 显示器之后,系统默认常常指到
+          显示器那一路</strong>,而声音其实还从笔记本扬声器出来 —— 那种情况下采到的
+          是静音,观众那边只有画面。听不到声音就到这里换一台。
+        </p>
+      </div>
     </div>
 
     <!-- OBS 直推模式下由 OBS 决定码率,这个控件要藏起来(见 app.js) -->
