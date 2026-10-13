@@ -133,10 +133,26 @@ func TestNormalizeControlPassword(t *testing.T) {
 	}
 }
 
-// 默认配置里不该躺着密码 —— 和令牌同一个道理:从没用过这个功能的
-// 配置文件里,不该有一串没人认识的秘密。
-func TestDefaultHasNoControlPassword(t *testing.T) {
-	if got := Default().RemoteControl.ControlPassword; got != "" {
-		t.Errorf("默认 ControlPassword = %q,想要空", got)
+// 控制密码的默认值是 123456,不是空。
+//
+// 这里和**令牌**的规则是相反的(令牌默认不生成,免得配置文件里躺着一串
+// 没人认识的秘密),因为要的东西正相反:令牌是这台机器独有的秘密,而
+// 控制密码图的是"对方直接填就知道",不用主机先设一次再告诉人。
+func TestDefaultHasControlPassword(t *testing.T) {
+	if got := Default().RemoteControl.ControlPassword; got != "123456" {
+		t.Errorf("默认 ControlPassword = %q,想要 123456", got)
+	}
+}
+
+// 但清空必须仍然是有效的设定。
+//
+// Normalize 不管密码这一格 —— 一旦它把空值填回默认,用户"清空 = 关掉这条
+// 捷径"就会在下次启动时自己长回来,而且没有任何提示。
+func TestNormalizeKeepsClearedPassword(t *testing.T) {
+	cfg := Config{}
+	cfg.RemoteControl.ControlPassword = ""
+	cfg.Normalize()
+	if got := cfg.RemoteControl.ControlPassword; got != "" {
+		t.Errorf("清空之后 Normalize 不该填回来,得到 %q", got)
 	}
 }
