@@ -36,6 +36,23 @@ func tokenMatch(want, got string) bool {
 	return subtle.ConstantTimeCompare([]byte(want), []byte(got)) == 1
 }
 
+// passwordMatch 比较观众送来的控制密码和主机设的那个。
+//
+// 和 tokenMatch 一样用恒定时间比较,但**单独一个函数而不是复用它**,因为
+// 两者的威胁模型不同:令牌是 256 位随机值,猜不中,所以上面那段注释说
+// "不需要对 /ws 做失败次数限流";密码是人选的,可能只有六个字符,重复猜
+// 是有意义的。所以密码这条路上除了这里的比较,还有 session.pwFails 的
+// 失败次数限制 —— 光有恒定时间比较挡不住暴力枚举。
+//
+// 空值一律不匹配:主机没设密码时(空串)不能让一个空输入直接通过,那等于
+// 人人自动获批。
+func passwordMatch(want, got string) bool {
+	if want == "" || got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(want), []byte(got)) == 1
+}
+
 // tokenFromRequest 从请求里取出令牌。
 //
 // 只看查询参数。观看页把令牌放在 URL 的 # 片段里,由页面脚本取出来

@@ -22,6 +22,12 @@ type clientMsg struct {
 	DY   int     `json:"dy,omitempty"`   // 滚轮纵向
 	Code string  `json:"code,omitempty"` // KeyboardEvent.code
 	S    string  `json:"s,omitempty"`    // 文本(打字 / 剪贴板)
+
+	// Pw 是观众在观看页上填的控制密码,随申请一起送上来。
+	//
+	// 它和下面 serverMsg.PasswordSet 不是一回事:这个字段装的是秘密本身,
+	// 那个是个布尔("主机设没设密码")。故意不叫同一个名字,免得两边读串。
+	Pw string `json:"pw,omitempty"`
 }
 
 // 客户端消息类型。
@@ -62,6 +68,12 @@ type serverMsg struct {
 	You       string `json:"you,omitempty"`
 	Clipboard bool   `json:"clipboard,omitempty"`
 
+	// PasswordSet 表示主机设了控制密码,t="hello" 时下发。
+	//
+	// 只用来决定观看页要不要显示那个密码框 —— 主机没设密码时摆一个填了
+	// 也没用的输入框,比不显示更让人困惑。**不是凭据**,只是个开关状态。
+	PasswordSet bool `json:"passwordSet,omitempty"`
+
 	// t="ctl" 时的控制权状态。
 	State  string `json:"state,omitempty"`
 	Reason string `json:"reason,omitempty"`
@@ -98,4 +110,6 @@ const (
 	errRate = "rate_limited"
 	// errBadMsg 是收到了解析不了的消息。
 	errBadMsg = "bad_message"
+	// errAuth 是控制密码连续填错太多次,连接已被断开。
+	errAuth = "auth_failed"
 )

@@ -96,6 +96,17 @@ type Status struct {
 	Token    string `json:"token,omitempty"`
 	Sessions int    `json:"sessions"`
 
+	// Password 是当前设的控制密码,**明文**,空表示没设。
+	//
+	// 状态里带一个秘密看着刺眼,但这里必须给:控制页要把它显示出来、
+	// 让主机复制给对方(存哈希就没法显示了,这是当初选明文的理由)。
+	// 而这个接口只绑回环(见 internal/server/server.go 顶部),不出本机。
+	//
+	// 放在 Status 而不是让页面去读配置快照:控制页手里的 config 是载入时
+	// 的那一份,而 Status 每个远控接口都会返回最新值,不存在"页面显示的是
+	// 旧密码、复制出去却对不上"的窗口。
+	Password string `json:"password,omitempty"`
+
 	// Clipboard 报告剪贴板同步是不是开着。
 	Clipboard bool `json:"clipboard"`
 
@@ -149,6 +160,7 @@ type Server struct {
 	mu       sync.Mutex
 	enabled  bool
 	token    string
+	password string
 	port     int
 	listener net.Listener
 	httpSrv  *http.Server
@@ -295,16 +307,25 @@ func isAddrInUse(err error) bool {
 	return errno == wsaEADDRINUSE || errno == syscall.EADDRINUSE
 }
 
-// Configure 更新端口、令牌和剪贴板开关。
+// Configure 更新端口、令牌、控制密码和剪贴板开关。
 //
 // 端口变了要在下次 SetEnabled(true) 时才生效;已经开着的话调用方应当
 // 先关再开(控制页那边就是这么做的),否则用户会以为改完立刻就换了端口。
 //
 // 剪贴板开关就不同:它是每次收发时现读的,改完立刻生效,不需要重开。
-func (s *Server) Configure(port int, token string, allowClipboard bool) {
+//
+// 密码也是现读的,并且**只影响下一次申请**:改完之后,已经在控制的那个人
+// 照旧控制着,不会被踢掉。改密码不该中断正在进行的一次协助 —— 想立刻
+// 赶人就按"收回控制权",那是另一件事、另一个按钮。
+//
+// 这四个参数挤在一个调用里而不是拆成几个 setter:可变设置全都从这一条路
+// 推下去,拆开之后迟早会有某条路(托盘、控制页、重置凭据)漏掉其中一个。
+// 四种设置里漏一种是查不出来的 —— 界面会一直显示旧值。
+func (s *Server) Configure(port int, token, password string, allowClipboard bool) {
 	s.mu.Lock()
 	s.port = port
 	s.token = token
+	s.password = password
 	s.clip = nil
 	if allowClipboard {
 		s.clip = s.clipboard
@@ -325,6 +346,16 @@ func (s *Server) currentToken() string {
 	return s.token
 }
 
+// currentPassword 返回当前的控制密码;没设则返回空串。
+//
+// 空串在调用方是一个有意义的信号("没设密码,走原来的批准流程"),
+// 见 handleCtl。
+func (s *Server) currentPassword() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.password
+}
+
 func (s *Server) captureRect() (screen.Rect, bool) {
 	if s.opts.CaptureRect == nil {
 		return screen.Rect{}, false
@@ -342,6 +373,7 @@ func (s *Server) Status() Status {
 		Token:     s.token,
 		Sessions:  len(s.sessions),
 		Clipboard: s.clip != nil,
+		Password:  s.password,
 		LastError: s.lastErr,
 	}
 	s.mu.Unlock()
@@ -359,22 +391,32 @@ func (s *Server) Approve(id string) bool {
 		return false
 	}
 	if sess := s.session(id); sess != nil {
-		sess.write(serverMsg{Type: msgCtl, State: stateGranted})
+		s.grant(sess)
 		log.Printf("远程控制:已批准 %s", sess.label)
-
-		// 把主机剪贴板**当前**的内容补送一份。
-		//
-		// 轮询只在内容变化时通知,而"复制好东西再连过来"是最常见的用法 ——
-		// 那段内容的变化发生在拿到控制权之前,不补这一下,控制者就永远
-		// 等不到它。
-		if clip := s.clipSync(); clip != nil {
-			if text := clip.Current(); text != "" {
-				sess.write(serverMsg{Type: msgClip, S: text})
-			}
-		}
 	}
 	s.notify()
 	return true
+}
+
+// grant 告诉观众"控制权是你的了",并把主机剪贴板**当前**的内容补送一份。
+//
+// 批准(主机点"允许")和密码通道(填对了密码)都走这里。两处各写一遍会
+// 分叉出一个很难发现的 bug:走密码那条路的控制者拿不到下面这段剪贴板,
+// 表现为"同样的事情,有时候剪贴板能同步有时候不能"。
+//
+// 日志留给调用方 —— 两条路该记的话不一样("已批准"是人点的,"密码通过"
+// 不是),而这里只负责把状态发出去。
+func (s *Server) grant(sess *session) {
+	sess.write(serverMsg{Type: msgCtl, State: stateGranted})
+
+	// 补送剪贴板的原因:轮询只在内容变化时通知,而"复制好东西再连过来"
+	// 是最常见的用法 —— 那段内容的变化发生在拿到控制权之前,不补这一下,
+	// 控制者就永远等不到它。
+	if clip := s.clipSync(); clip != nil {
+		if text := clip.Current(); text != "" {
+			sess.write(serverMsg{Type: msgClip, S: text})
+		}
+	}
 }
 
 // Deny 拒绝一份控制申请。
@@ -644,9 +686,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.pingLoop(sess)
 
 	sess.write(serverMsg{
-		Type:      "hello",
-		You:       sess.id,
-		Clipboard: s.clipSync() != nil,
+		Type:        "hello",
+		You:         sess.id,
+		Clipboard:   s.clipSync() != nil,
+		PasswordSet: s.currentPassword() != "",
 	})
 
 	log.Printf("远程控制:观众 %s 已连接(%s)", sess.id, label)

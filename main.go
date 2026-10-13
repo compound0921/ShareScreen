@@ -278,7 +278,8 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		},
 	})
 	defer remote.Close()
-	remote.Configure(cfg.RemoteControl.Port, cfg.RemoteControl.Token, cfg.RemoteControl.AllowClipboard)
+	remote.Configure(cfg.RemoteControl.Port, cfg.RemoteControl.Token,
+		cfg.RemoteControl.ControlPassword, cfg.RemoteControl.AllowClipboard)
 
 	popups.approve = remote.Approve
 	popups.deny = remote.Deny

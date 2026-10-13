@@ -49,9 +49,9 @@ const els = {
   rcField: $('rcField'),
   rcEnabled: $('rcEnabled'),
   rcUnsupported: $('rcUnsupported'),
-  rcHint: $('rcHint'),
-  rcCursorHint: $('rcCursorHint'),
   rcPort: $('rcPort'),
+  rcPassword: $('rcPassword'),
+  rcPasswordCopy: $('rcPasswordCopy'),
   rcClipboard: $('rcClipboard'),
   rcLinks: $('rcLinks'),
   rcLinkList: $('rcLinkList'),
@@ -563,6 +563,9 @@ function renderRemoteControl(st, supported) {
   // 正在输入的时候不回填,否则用户打到一半的数字会被冲掉
   if (document.activeElement !== els.rcEnabled) els.rcEnabled.checked = on;
   if (document.activeElement !== els.rcPort) els.rcPort.value = st.port;
+  // 密码同理。**这里尤其要紧**:密码是一串字符,被轮询冲掉的话用户
+  // 会看着自己刚敲的东西一个个消失,而这种"打不进去"的框最难归因。
+  if (document.activeElement !== els.rcPassword) els.rcPassword.value = st.password || '';
   if (document.activeElement !== els.rcClipboard) els.rcClipboard.checked = !!st.clipboard;
   els.rcClipboard.disabled = !on;
 
@@ -571,10 +574,6 @@ function renderRemoteControl(st, supported) {
   rcSupported = supported;
   els.rcEnabled.disabled = !supported;
   els.rcUnsupported.hidden = supported;
-  els.rcHint.hidden = !supported;
-  // 光标那一段和 rcHint 同一个条件 —— 采集源不支持远控时,光标根本
-  // 不会从画面里去掉,这时候讲它只会让人以为功能坏了。
-  els.rcCursorHint.hidden = !supported;
 
   els.rcError.hidden = !st.lastError;
   if (st.lastError) els.rcError.textContent = st.lastError;
@@ -675,6 +674,28 @@ function initRemoteControl() {
     if (port > 0 && port <= 65535) {
       rcPost('/api/rc/enable', { port });
     }
+  });
+
+  // 控制密码。用 change 而不是 input:和端口那个框同一个理由 —— 别每敲
+  // 一个字就往配置里写一次。change 在失焦或回车时触发,正是"写完了"的时机。
+  //
+  // 不做本地校验:空串是有意义的一次设置(关掉这条捷径),而服务端会去掉
+  // 首尾空白 —— 回来的时候 renderRemoteControl 会把整理过的值回填到框里,
+  // 用户一眼就能看到实际生效的是什么。
+  els.rcPassword.addEventListener('change', () => {
+    rcPost('/api/rc/enable', { controlPassword: els.rcPassword.value });
+  });
+
+  els.rcPasswordCopy.addEventListener('click', async () => {
+    const pw = els.rcPassword.value;
+    if (!pw) return;
+    try {
+      await navigator.clipboard.writeText(pw);
+      els.rcPasswordCopy.textContent = '已复制';
+    } catch {
+      els.rcPasswordCopy.textContent = '复制失败';
+    }
+    setTimeout(() => { els.rcPasswordCopy.textContent = '复制'; }, 1200);
   });
 
   els.rcApprove.addEventListener('click', () => {

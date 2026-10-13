@@ -123,6 +123,7 @@ label {
 
 input[type="text"],
 input[type="number"],
+input[type="password"],
 select {
   width: 100%;
   padding: 8px 10px;
@@ -153,6 +154,8 @@ select {
   gap: 8px;
 }
 .inline-row select { flex: 1; min-width: 0; }
+/* 文本框默认 width:100%,在 flex 行里要允许它收缩,否则会把「复制」按钮挤出去 */
+.inline-row input { flex: 1; min-width: 0; }
 .inline-row button { flex-shrink: 0; }
 
 .gap-top { margin-top: 12px; }

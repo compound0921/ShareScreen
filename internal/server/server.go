@@ -42,7 +42,7 @@ type PortMapper interface {
 // 监听端口的服务。
 type RemoteController interface {
 	SetEnabled(on bool) error
-	Configure(port int, token string, allowClipboard bool)
+	Configure(port int, token, password string, allowClipboard bool)
 	Status() remotectl.Status
 	Approve(id string) bool
 	Deny(id string) bool
@@ -155,7 +155,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	static, _ := fs.Sub(webui.Files, "static")
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(static))))
+	mux.Handle("/static/", noStore(http.StripPrefix("/static/", http.FileServer(http.FS(static)))))
 	mux.HandleFunc("/", s.handleIndex)
 
 	mux.HandleFunc("/api/alive", s.handleAlive)
@@ -222,7 +222,29 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// 页面本身也不缓存 —— 理由同 noStore:它和 /static/app.js 必须同一版。
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
+}
+
+// noStore 给控制页的静态资源加上"别缓存"。
+//
+// 这些文件是**编译进 exe** 的:换一版程序,index.html 和 app.js 会一起换,
+// 而它们必须始终配套 —— 页面里增删一个元素,同一版的 JS 就会跟着改一处
+// 引用,拿旧的 app.js 配新的 index.html 会在 null 上取属性,整个面板当场
+// 不再更新,而且报错在控制台里,页面上只是"没反应"。
+//
+// embed.FS 里的文件没有修改时间,FileServer 因此既不发 Last-Modified 也不发
+// ETag,浏览器只能靠启发式规则猜 —— 猜错就是上面那种混搭。页面是本机的
+// 一两百 KB 资源,每次重新拉一遍的代价可以忽略。
+//
+// 远控的观看页早就是这么做的(见 internal/remotectl 的 handlePage),
+// 这里只是把同一条规矩补到控制页这一侧。
+func noStore(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		h.ServeHTTP(w, r)
+	})
 }
 
 // ---------- 配置读写 ----------

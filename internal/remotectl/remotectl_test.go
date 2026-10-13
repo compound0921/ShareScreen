@@ -156,6 +156,69 @@ func TestControlSnapshot(t *testing.T) {
 	}
 }
 
+// ---------- 控制密码(自动批准) ----------
+
+// TestGrantIfFree 覆盖密码通道的冲突判定:没人占的时候直接给,有人占着
+// 的时候和普通申请一样是 busy —— 密码是"不用麻烦主机点一下",不是夺权。
+func TestGrantIfFree(t *testing.T) {
+	var c control
+
+	if got := c.grantIfFree("a", "10.0.0.1"); got != stateGranted {
+		t.Fatalf("没人控制时应当直接授予,得到 %q", got)
+	}
+	if c.holder() != "a" {
+		t.Fatalf("控制者是 %q,期望 a", c.holder())
+	}
+	// 别人正在控制:密码再对也不能把人顶下来
+	if got := c.grantIfFree("b", "10.0.0.2"); got != stateBusy {
+		t.Fatalf("已经有人在控制时应当是 busy,得到 %q", got)
+	}
+	if c.holder() != "a" {
+		t.Fatalf("busy 不该改变控制者,现在是 %q", c.holder())
+	}
+	// 控制者自己再点一次是幂等的
+	if got := c.grantIfFree("a", "10.0.0.1"); got != stateGranted {
+		t.Fatalf("控制者重复申请应当是 granted,得到 %q", got)
+	}
+}
+
+// TestGrantIfFreeWithPending 是这条通道最容易写错的一处:别人已经在排队
+// 等主机批准时不能插队,而**排队的本人**补上密码应当升格,不是被告知 busy。
+func TestGrantIfFreeWithPending(t *testing.T) {
+	var c control
+	c.request("a", "10.0.0.1") // a 先申请了,在等主机点允许
+
+	if got := c.grantIfFree("b", "10.0.0.2"); got != stateBusy {
+		t.Fatalf("别人在排队时不该插队,得到 %q", got)
+	}
+
+	// a 又想起来了密码,补填一次
+	if got := c.grantIfFree("a", "10.0.0.1"); got != stateGranted {
+		t.Fatalf("排队者补上密码应当升格为控制者,得到 %q", got)
+	}
+	owner, pending := c.snapshot()
+	if owner != "10.0.0.1" {
+		t.Fatalf("控制者应当是 a 的地址,得到 %q", owner)
+	}
+	if pending != nil {
+		t.Fatalf("升格之后不该还挂在待批准列表里: %+v", pending)
+	}
+}
+
+func TestPasswordMatch(t *testing.T) {
+	if !passwordMatch("hunter2", "hunter2") {
+		t.Fatal("同一个密码应当匹配")
+	}
+	if passwordMatch("hunter2", "hunter3") {
+		t.Fatal("不同的密码不该匹配")
+	}
+	// 主机**没设**密码时(空串),一个空输入绝不能被当成匹配 ——
+	// 那等于所有人自动获批,等于第二层门槛没了。
+	if passwordMatch("", "") || passwordMatch("", "hunter2") || passwordMatch("hunter2", "") {
+		t.Fatal("空密码不该匹配任何东西")
+	}
+}
+
 // ---------- 注入队列的顺序 ----------
 
 // TestQueueKeepsOrder 是这个功能里最要紧的一条测试。

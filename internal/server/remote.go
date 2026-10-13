@@ -61,7 +61,8 @@ func (s *Server) applyRemoteControl(mutate func(*config.RemoteControlConfig)) er
 		s.remote.DisconnectAll()
 		_ = s.remote.SetEnabled(false)
 	}
-	s.remote.Configure(next.RemoteControl.Port, next.RemoteControl.Token, next.RemoteControl.AllowClipboard)
+	s.remote.Configure(next.RemoteControl.Port, next.RemoteControl.Token,
+		next.RemoteControl.ControlPassword, next.RemoteControl.AllowClipboard)
 
 	// 路由器上的映射也要跟上:关着的时候公网上不该留着指向这个端口的洞。
 	s.syncPortMapRules(next)
@@ -119,9 +120,10 @@ func (s *Server) handleRCEnable(w http.ResponseWriter, r *http.Request) {
 	// 两个字段都是可选的:端口走同一个端点改,但只改端口时不该顺手把
 	// 开关也动一下。用指针才能区分"没填"和"填了 false"。
 	var req struct {
-		Enabled        *bool `json:"enabled"`
-		Port           *int  `json:"port"`
-		AllowClipboard *bool `json:"allowClipboard"`
+		Enabled         *bool   `json:"enabled"`
+		Port            *int    `json:"port"`
+		AllowClipboard  *bool   `json:"allowClipboard"`
+		ControlPassword *string `json:"controlPassword"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求格式错误"})
@@ -137,6 +139,11 @@ func (s *Server) handleRCEnable(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.AllowClipboard != nil {
 			rc.AllowClipboard = *req.AllowClipboard
+		}
+		// 用指针才能区分"没填"和"填了空串(= 清除密码)"。空串是有意义的
+		// 一次设置:它是"把这个捷径关掉,回到全靠当场批准"。
+		if req.ControlPassword != nil {
+			rc.ControlPassword = *req.ControlPassword
 		}
 	})
 	if err != nil {
@@ -206,7 +213,8 @@ func (s *Server) handleRCRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.remote.Configure(next.RemoteControl.Port, tok, next.RemoteControl.AllowClipboard)
+	s.remote.Configure(next.RemoteControl.Port, tok,
+		next.RemoteControl.ControlPassword, next.RemoteControl.AllowClipboard)
 	s.remote.DisconnectAll()
 
 	if next.RemoteControl.Enabled {

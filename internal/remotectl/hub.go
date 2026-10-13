@@ -113,6 +113,13 @@ type session struct {
 	notify chan struct{}
 	done   chan struct{}
 
+	// pwFails 是这条连接上控制密码连错的次数,见 messages.go 的 maxPwFails。
+	//
+	// 不加锁:它只在 readPump 这一个 goroutine 上读写(dispatch 是同步调用,
+	// 所有 clientMsg 都从那个循环里出来)。加了锁反而会让人以为还有别的
+	// 写入方。
+	pwFails int
+
 	// writeMu 串行化对 conn 的写。WebSocket 允许一个读和一个写并发,
 	// 但不允许两个写并发。
 	writeMu sync.Mutex
