@@ -169,3 +169,31 @@ func TestCaptureOptsFor(t *testing.T) {
 		})
 	}
 }
+
+// TestViewerRotation 钉住"要不要让观众把画面转回来"这条规则。
+//
+// 它是按采集源分的:ddagrab 走 DXGI,拿到的是未旋转的原始画面;gdigrab 走
+// GDI,拿到的已经转好了。**分错了的表现是画面倒着、而且没有任何报错** ——
+// 所以这条规则值得一条测试。
+func TestViewerRotation(t *testing.T) {
+	cases := []struct {
+		name  string
+		src   config.SourceType
+		rot   int
+		want  int
+	}{
+		{"GPU 采集 + 倒装的屏", config.SourceScreenDDAGrab, 180, 180},
+		{"GPU 采集 + 正常的屏", config.SourceScreenDDAGrab, 0, 0},
+		{"兼容模式不用补 —— 它拿到的是转好的画面", config.SourceScreenGDI, 180, 0},
+		{"窗口采集同样不用补", config.SourceWindow, 180, 0},
+		{"90° 不处理(长短边会互换,牵一发动全身)", config.SourceScreenDDAGrab, 90, 0},
+		{"270° 同上", config.SourceScreenDDAGrab, 270, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ViewerRotation(config.VideoConfig{Source: c.src}, c.rot); got != c.want {
+				t.Errorf("ViewerRotation(%s, %d) = %d,想要 %d", c.src, c.rot, got, c.want)
+			}
+		})
+	}
+}

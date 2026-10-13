@@ -133,6 +133,27 @@ type Options struct {
 	WebRTCPort int
 	StreamPath string
 
+	// Rotate 返回观众需要把画面转回来多少度(0 或 180)。
+	//
+	// 采集端补不了:ddagrab 那条路是零拷贝,插一个 CPU 翻转实测比 gdigrab
+	// 还慢(3.66s vs 3.06s CPU/5 秒),而 GPU 翻转这个 ffmpeg 版本不支持。
+	// 所以放在观众那边转 —— 浏览器做一次 CSS 旋转不花任何代价,主机侧的
+	// 零拷贝原样保留。代价是流本身是倒的(录下来、用别的播放器看都是倒的)。
+	//
+	// **是个函数而不是一个值**:采集源可以在控制页当场改,而"要不要转"
+	// 正是由采集源决定的(ddagrab 要、gdigrab 不要)。写成固定值的话,用户
+	// 从 GPU 采集切回兼容模式之后画面会一直倒着,而且看不出为什么 ——
+	// 和 CaptureRect 是同一个理由。
+	Rotate func() int
+
+	// LANHosts 是本机在局域网里的地址(路由表推出来的那个排第一)。
+	//
+	// 观看页只用它做一件事:发现自己是从公网地址打开的、而其中某个地址
+	// 又够得着,就把整页换过去重开。同网段走公网会绕一圈互联网,实测延迟
+	// 差 2–3 倍 —— 而这件事让观众自己判断是不可能的,他不知道自己"其实在
+	// 同一个网里"。
+	LANHosts []string
+
 	// Inject 是注入实现。nil 表示用真实实现(测试里换成假的)。
 	Inject Injector
 
@@ -634,22 +655,35 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-// handleConfig 给观看页提供它自己拼不出来的东西:WHEP 地址。
+// handleConfig 给观看页提供它自己拼不出来的东西:WHEP 地址和本机的局域网地址。
 //
 // 端口用的是配置里的 WebRTCPort,主机名由页面那边填 location.hostname ——
-// 观众是从哪个地址连上来的,就按哪个地址去找流,不用程序去猜他走的是
-// 局域网还是公网。
+// 观众是从哪个地址连上来的,就按哪个地址去找流。
+//
+// lan 那一条是例外:**那是页面猜不出来的**。页面只知道自己是被人用哪个
+// 地址打开的,不知道自己是不是就坐在同一个局域网里 —— 而这正是"同网段
+// 却绕公网"那个坑的成因,见 rc.js 的 preferLAN。
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	port := s.opts.WebRTCPort
 	path := s.opts.StreamPath
+	lan := s.opts.LANHosts
+	rotate := s.opts.Rotate
 	s.mu.Unlock()
+
+	// 在锁外面调:它要去读当前的采集配置(见 Rotate 的说明)
+	deg := 0
+	if rotate != nil {
+		deg = rotate()
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"whepPort": port,
 		"path":     path,
+		"lan":      lan,
+		"rotate":   deg,
 	})
 }
 

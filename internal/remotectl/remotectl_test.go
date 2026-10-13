@@ -1,6 +1,9 @@
 package remotectl
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -193,6 +196,83 @@ func TestControlCancelPendingDoesNotTouchOthers(t *testing.T) {
 	owner, pending := c.snapshot()
 	if owner != "" || pending == nil || pending.RemoteIP != "10.0.0.1" {
 		t.Fatalf("a 的申请不该被动到: owner=%q pending=%+v", owner, pending)
+	}
+}
+
+// ---------- 观看页的配置接口 ----------
+
+// TestConfigEndpointReportsLANHosts 钉住 /rc/config 里的 lan 那一条。
+//
+// 观看页靠它判断"我是不是该换到局域网地址重开"。这个字段一旦悄悄没了,
+// 表现是**没有任何报错、延迟默默变回绕公网**—— 因为页面会安安静静地回到
+// "用 location.hostname"那条老路。所以它值得一条测试。
+func TestConfigEndpointReportsLANHosts(t *testing.T) {
+	s := New(Options{
+		WebRTCPort: 8889,
+		StreamPath: "live",
+		LANHosts:   []string{"192.168.3.236", "10.126.126.1"},
+		Rotate:     func() int { return 180 },
+	})
+
+	rec := httptest.NewRecorder()
+	s.handleConfig(rec, httptest.NewRequest(http.MethodGet, "/rc/config", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 %d,期望 200", rec.Code)
+	}
+	var got struct {
+		WHEPPort int      `json:"whepPort"`
+		Path     string   `json:"path"`
+		LAN      []string `json:"lan"`
+		Rotate   int      `json:"rotate"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("解析失败: %v(%s)", err, rec.Body.String())
+	}
+	if got.WHEPPort != 8889 || got.Path != "live" {
+		t.Fatalf("端口/路径不对: %+v", got)
+	}
+	if len(got.LAN) != 2 || got.LAN[0] != "192.168.3.236" {
+		t.Fatalf("局域网地址表不对(顺序也有含义,第一个是优先探的): %+v", got.LAN)
+	}
+	// 观看页靠它决定要不要把画面转回来。取不到就是画面倒着,而没有任何报错。
+	if got.Rotate != 180 {
+		t.Fatalf("旋转角不对: %d", got.Rotate)
+	}
+}
+
+// Rotate 没配时下发 0,而不是让接口崩 —— 页面对 0 的处理就是"不转"。
+func TestConfigEndpointRotateDefaultsZero(t *testing.T) {
+	s := New(Options{})
+	rec := httptest.NewRecorder()
+	s.handleConfig(rec, httptest.NewRequest(http.MethodGet, "/rc/config", nil))
+
+	var got struct {
+		Rotate int `json:"rotate"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if got.Rotate != 0 {
+		t.Fatalf("没配的时候应当是 0,得到 %d", got.Rotate)
+	}
+}
+
+// 探测不到局域网地址(纯内网、离线)时这一项是空的,而不是让接口报错 ——
+// 页面那边 `cfg.lan || []` 吃得住空值,但吃不接口出错。
+func TestConfigEndpointLANEmpty(t *testing.T) {
+	s := New(Options{})
+	rec := httptest.NewRecorder()
+	s.handleConfig(rec, httptest.NewRequest(http.MethodGet, "/rc/config", nil))
+
+	var got struct {
+		LAN []string `json:"lan"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("解析失败: %v(%s)", err, rec.Body.String())
+	}
+	if len(got.LAN) != 0 {
+		t.Fatalf("没有局域网地址时应当是空的,得到 %+v", got.LAN)
 	}
 }
 

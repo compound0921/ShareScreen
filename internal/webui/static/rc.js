@@ -64,6 +64,8 @@ const state = {
   ready: false,
   retry: 0,
   closedByUs: false,
+  // rotate 是主机要求把画面转回来的角度(0/180),见 main 里那段说明。
+  rotate: 0,
 };
 
 // ───────────────────────── 启动 ─────────────────────────
@@ -72,6 +74,41 @@ async function main() {
   if (!TOKEN) {
     fail('链接里没有凭据', '请使用主机发来的「可控制链接」,不要手工拼地址。');
     return;
+  }
+
+  // 配置先拉一次。观看页要的东西就这几样,拉两次没意义 —— 而且局域网判断
+  // 必须发生在**连任何东西之前**(见 preferLAN)。
+  let cfg;
+  try {
+    cfg = await fetch('/rc/config', { cache: 'no-store' }).then((r) => r.json());
+  } catch (e) {
+    fail('拿不到画面', String(e && e.message ? e.message : e));
+    return;
+  }
+
+  // 同网段却从公网地址打开的:换到局域网地址重开,这一轮到此为止。
+  // 放在这里而不是 startVideo 里,是为了别先连上 WebSocket 再跳走 ——
+  // 主机日志里会多一条无意义的连接,页面上还会闪一下"已连接"。
+  if (await preferLAN(cfg)) return;
+
+  // 主机的屏幕被系统转过(比如物理倒装的显示器),而采集走的是 GPU 那条
+  // 零拷贝路 —— 那种采集拿到的是**未旋转的原始画面**,所以流是倒的。
+  //
+  // 为什么不在主机端转回来:零拷贝那点好处会被一次 CPU 翻转全吃掉,实测
+  // 比 gdigrab 还慢(3.66s vs 3.06s CPU / 5 秒);GPU 翻转这个 ffmpeg 版本
+  // 又不支持(d3d11 既进不了 transpose_cuda,也映射不到 cuda)。浏览器做
+  // 一次 CSS 旋转不花任何代价,所以放在这里转。
+  //
+  // ⚠️ **坐标不用另外翻。** 旋转作用在元素的渲染结果上,画面内容跟着一起
+  // 转;而 contentRect() 量的是元素盒子(180° 旋转不改变盒子)。于是
+  // "屏幕上的位置 → 归一化坐标"这条映射原样成立:观众在画面上看到的那个
+  // 位置,归一化之后正好就是主机上的那个位置。多翻一次会变成对角镜像 ——
+  // 那种错法看着像"点哪都差一半",其实是在对角线另一头。
+  //
+  // 代价是流本身是倒的:录下来、或用别的播放器打开,看到的是倒的。
+  state.rotate = cfg.rotate === 180 ? 180 : 0;
+  if (state.rotate) {
+    els.video.style.transform = `rotate(${state.rotate}deg)`;
   }
 
   els.startBtn.hidden = false;
@@ -87,7 +124,7 @@ async function main() {
   connectWS();
 
   try {
-    await startVideo();
+    await startVideo(cfg);
   } catch (e) {
     fail('拿不到画面', String(e && e.message ? e.message : e));
   }
@@ -111,14 +148,90 @@ function showError(msg) {
   els.err.textContent = msg;
 }
 
+// ───────────────────── 局域网优先 ─────────────────────
+//
+// 同一个网络里从**公网地址**打开观看页,媒体流会绕一圈互联网(出到路由器,
+// 经运营商再回来)。实测延迟差 2–3 倍:公网 ~500ms,局域网 ~100–200ms ——
+// 因为路径上的抖动会把浏览器接收端的抖动缓冲撑大。
+//
+// 而 ICE 候选列表对谁都是同一份(MediaMTX 一律给三条:网卡地址、公网地址、
+// 回环),所以**光把 WHEP 地址换成局域网是没用的**。真正起作用的是这个页面
+// 从哪个地址加载 —— 这一点是实测出来的:同网段那台设备,配置一个字没改,
+// 用局域网链接打开是 100–200ms,用公网链接打开就是 500ms。
+//
+// 所以这里做的正是"人刚才手动做的那件事":发现本页不是从局域网地址打开的、
+// 而某个局域网地址又够得着,就整页换过去重开。够得着是**探**出来的,不是
+// 猜的 —— 猜错的表现是画面彻底出不来,而且看不出为什么。
+const PRIVATE_IP = /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+
+function looksLocal(host) {
+  return host === 'localhost' || PRIVATE_IP.test(host);
+}
+
+// reachable 探一个局域网地址通不通。
+//
+// 探的是这台服务器自己的接口(同一个端口),不是媒体端口 —— 要判断的是
+// "这个地址是不是通往主机的局域网那条路"。
+//
+// 用 no-cors 是被迫的:跨源请求如果不这么写,浏览器会因为拿不到 CORS 头
+// 就判定失败,而它明明答了。这里不需要读内容,只要"答了"这一个事实,
+// 拿到不透明响应正好。
+function reachable(host) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 400);
+  return fetch(`${location.protocol}//${host}:${location.port}/rc/config`, {
+    mode: 'no-cors',
+    cache: 'no-store',
+    signal: ctl.signal,
+  }).then(() => true, () => false).finally(() => clearTimeout(timer));
+}
+
+// lanSwitchDisabled 读链接上那个"别自动切"的开关。?lan=off 或 ?lan=0。
+//
+// 为什么留这个口子:自动切换修的是"同网段却绕公网"那个坑,但它同时让
+// "我就想从公网这条路连一次"变得做不到 —— 而验证公网路径、量它的延迟、
+// 看它在弱网下什么样,都是必须能做的事。默认仍然是自动切。
+function lanSwitchDisabled() {
+  const v = (new URLSearchParams(location.search).get('lan') || '').toLowerCase();
+  return v === 'off' || v === '0' || v === 'false' || v === 'no';
+}
+
+// preferLAN 在需要且能够时把页面换到局域网地址重开。
+// 返回 true 表示已经发起跳转,调用方这一轮什么都不该再做。
+async function preferLAN(cfg) {
+  if (lanSwitchDisabled()) return false;
+
+  const lan = (cfg && cfg.lan) || [];
+  if (!lan.length) return false;
+  // 本来就是从局域网地址(或 localhost)打开的,没什么可换
+  if (looksLocal(location.hostname)) return false;
+  // 防循环:万一跳过去之后那个地址又不在 lan 里(比如配置里写的是域名),
+  // 至少不会来回跳
+  if (sessionStorage.getItem('preferLAN')) return false;
+
+  // **并行探,不串行**:串行的话多几个候选就会把"真的在外面"的人拖上
+  // 好几个超时。并行之后,该等的时间只有一个超时(局域网里则几乎是立刻,
+  // 因为每个探测都马上有回音)。
+  const ok = await Promise.all(lan.map(reachable));
+  // 按 lan 的顺序取第一个通的 —— 顺序有意义(路由表推出来的排第一)
+  const host = lan[ok.findIndex((v) => v)];
+  if (!host) return false;
+
+  sessionStorage.setItem('preferLAN', '1');
+  // **必须带上 # 片段** —— 令牌就在里面,丢了这页就再也连不上了。
+  location.replace(
+    `${location.protocol}//${host}:${location.port}` +
+    `${location.pathname}${location.search}${location.hash}`,
+  );
+  return true;
+}
+
 // ───────────────────────── WHEP 拉流 ─────────────────────────
 
-async function startVideo() {
-  const cfg = await fetch('/rc/config', { cache: 'no-store' }).then((r) => r.json());
-
+async function startVideo(cfg) {
   // 主机名用 location.hostname:观众是从哪个地址连上来的,就按哪个地址
-  // 去找流。程序不去猜他走的是局域网还是公网 —— 猜错的表现是画面出不来,
-  // 而且完全看不出为什么。
+  // 去找流。走到这里说明 preferLAN 没换过页(本来就在局域网里,或者探下来
+  // 一个局域网地址都不通 —— 那就是真的在外面),所以照旧。
   state.whepBase = `${location.protocol}//${location.hostname}:${cfg.whepPort}/${cfg.path}`;
 
   const pc = new RTCPeerConnection({ iceServers: [] });

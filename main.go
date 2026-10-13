@@ -262,6 +262,14 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	remote := remotectl.New(remotectl.Options{
 		WebRTCPort: cfg.WebRTCPort,
 		StreamPath: cfg.StreamPath,
+		LANHosts:   lanHosts(ip),
+		// 显示器被系统转过(比如物理倒装的屏)时,ddagrab 采到的是倒的,
+		// 让观看页转回来。判断在 ffmpeg 包里,和别的采集源规则放一起。
+		//
+		// 现读:采集源能在控制页当场改,而"要不要转"正是跟着采集源走的。
+		Rotate: func() int {
+			return ffmpeg.ViewerRotation(manager.Config().Video, screen.DisplayRotation())
+		},
 		Clipboard:  clipboard.New(),
 		CaptureRect: func() (screen.Rect, bool) {
 			return ffmpeg.CaptureRect(manager.Config().Video)
@@ -701,6 +709,33 @@ func scanLANIPs() []string {
 // Label 填网卡名 —— 这台机器上就有 `astral`(VPN)和 `WLAN` 两块,只写两个
 // IP 用户没法判断哪个是同事能连上的那块。**顺序不能动**:第一条是"自动"
 // 会选的那个,前端据此渲染默认项。
+// lanHosts 是给观看页用的局域网地址表:路由表推出来的那个排第一,后面是
+// 探测到的其余候选。
+//
+// 顺序有含义:观看页按顺序探,先用能用的那个。排第一的是 lanIP() 的结果
+// (默认路由出口),多网卡机器上它才是真正连到路由器的那块 —— 这一点和
+// 端口映射、观看链接用的是同一条判据,见 lanIP 的注释。
+func lanHosts(auto string) []string {
+	out := make([]string, 0, 4)
+	seen := map[string]bool{}
+	for _, ip := range append([]string{auto}, lanCandidateIPs()...) {
+		if ip != "" && !seen[ip] {
+			seen[ip] = true
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+func lanCandidateIPs() []string {
+	cands := lanCandidates()
+	out := make([]string, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, c.Host)
+	}
+	return out
+}
+
 func lanCandidates() []server.AddressCandidate {
 	addrs := scanLANAddrs()
 	out := make([]server.AddressCandidate, 0, len(addrs))

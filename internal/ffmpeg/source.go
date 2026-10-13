@@ -41,6 +41,28 @@ func CaptureOptsFor(v config.VideoConfig, remoteEnabled bool) CaptureOpts {
 	}
 }
 
+// ViewerRotation 返回**观众需要把画面转回来多少度**,0 表示不用转。
+//
+// 只有 ddagrab 需要补。它走 DXGI 桌面复制,拿到的是未旋转的原始画面 ——
+// 旋转是系统在扫描输出那一步做的;显示器设成 180° 时,采到的就是倒的。
+// gdigrab 走 GDI,拿到的已经是转好的画面,补了就反而错了。
+//
+// 实测确认过这条前提:同一块 180° 的屏,ddagrab 的画面旋转 180° 之后与
+// gdigrab 的 SSIM 是 0.9999,不旋转只有 0.445。
+//
+// 只处理 180°。90/270 牵扯的不只是转一下:那种情况下 DXGI 给的原始画面
+// 和系统的桌面尺寸**长短边互换**,采集端、缩放、坐标映射全都按"不换"写的。
+// 与其在这里悄悄给一个半个对的答案,不如留 0 —— 转错了比不转更糟。
+func ViewerRotation(v config.VideoConfig, displayRotation int) int {
+	if v.Source != config.SourceScreenDDAGrab {
+		return 0
+	}
+	if displayRotation == 180 {
+		return 180
+	}
+	return 0
+}
+
 // inputArgs 返回采集源的输入段参数。
 func inputArgs(v config.VideoConfig, o CaptureOpts) ([]string, error) {
 	fps := fmt.Sprintf("%d", v.FPS)

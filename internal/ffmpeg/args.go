@@ -100,7 +100,24 @@ func keyframeSec(v config.VideoConfig) int {
 
 func encoderArgs(enc Encoder, v config.VideoConfig) []string {
 	br := fmt.Sprintf("%dk", v.BitrateKbps)
-	rate := []string{"-b:v", br, "-maxrate", br, "-bufsize", br}
+
+	// VBV(bufsize)压到 1/6 秒,而不是跟着码率走(原来等于整整 1 秒)。
+	//
+	// 它不直接等于"延迟",但它是编码端唯一还能拧的一颗螺丝:缓冲越大,码率
+	// 控制越能攒出突发,而这条流是经 RTSP/TCP 推给 MediaMTX 的 —— TCP 上的
+	// 突发就是排队,排队就是延迟;到了接收端还会表现为抖动,让浏览器的抖动
+	// 缓冲跟着涨(公网那条路上延迟差 2–3 倍,大头正是接收端缓冲)。
+	//
+	// 顺带记一笔:另一颗常被推荐的螺丝 -rc-lookahead 在这里没用 ——
+	// 实测 h264_nvenc 的默认值本来就是 0(见 ffmpeg -h encoder=h264_nvenc)。
+	//
+	// 代价:复杂画面下画质波动更大(同样的平均码率被摊得更平)。屏幕内容
+	// 大部分时间是静态的,这笔买卖划算。
+	bufKbps := v.BitrateKbps / 6
+	if bufKbps < 100 {
+		bufKbps = 100 // 别做出一个退化的窗口
+	}
+	rate := []string{"-b:v", br, "-maxrate", br, "-bufsize", fmt.Sprintf("%dk", bufKbps)}
 
 	var head []string
 	switch enc.Kind {
