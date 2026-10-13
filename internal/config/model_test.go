@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // 自动端口映射能不能改写公网地址 —— 这条规则决定了用户手填的 DDNS 域名
 // 会不会被程序悄悄覆盖掉。
@@ -99,5 +102,41 @@ func TestLanHostDoesNotTouchPublicHostAuto(t *testing.T) {
 func TestDefaultHasNoLanHost(t *testing.T) {
 	if got := Default().LanHost; got != "" {
 		t.Errorf("默认 LanHost = %q,想要空(空=自动)", got)
+	}
+}
+
+// 控制密码的首尾空白必须去掉:粘贴时多带一个空格在界面上看不出来,
+// 而填密码的人永远对不上 —— 表现为"密码明明是对的,就是不通过"。
+func TestNormalizeControlPassword(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"普通密码原样保留", "hunter2", "hunter2"},
+		{"内部空格是密码的一部分", "hunter 2", "hunter 2"},
+		{"首尾空白去掉", "  hunter2  ", "hunter2"},
+		{"全是空白 = 没设", "   ", ""},
+		{"空就是空", "", ""},
+		{"长得离谱 —— 当成文件写坏了清掉", strings.Repeat("x", 300), ""},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{}
+			cfg.RemoteControl.ControlPassword = c.in
+			cfg.Normalize()
+			if got := cfg.RemoteControl.ControlPassword; got != c.want {
+				t.Errorf("Normalize(%q) → %q,想要 %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// 默认配置里不该躺着密码 —— 和令牌同一个道理:从没用过这个功能的
+// 配置文件里,不该有一串没人认识的秘密。
+func TestDefaultHasNoControlPassword(t *testing.T) {
+	if got := Default().RemoteControl.ControlPassword; got != "" {
+		t.Errorf("默认 ControlPassword = %q,想要空", got)
 	}
 }

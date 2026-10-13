@@ -67,6 +67,42 @@ func (c *control) request(id, label string) string {
 	return statePending
 }
 
+// grantIfFree 在不和任何人冲突的前提下直接把控制权交给 id。
+//
+// 这是"控制密码"那条捷径:填对密码的观众不必等主机点批准。冲突判定和
+// request 完全一致 —— 有人正在控制、或者别人已经在排队等批准,一律回 busy:
+//
+//   - **不能夺权。** 密码决定"我要不要麻烦主机点一下",不决定"我能不能把
+//     别人正在用的控制权抢过来"。那件事只有主机的"收回控制权"能做。
+//   - **不能插队。** 别人已经在等主机批准了,这时候放一个知道密码的人先进去,
+//     那个排队的人会看到自己的申请凭空作废,而主机刚准备点"允许"。
+//
+// 唯独一种情况特殊:排队的就是自己。观众先不知道密码、点了申请,又想起来
+// 密码补填一次 —— 那就把他从队列里升格,而不是回一句 busy 让他重新排队。
+func (c *control) grantIfFree(id, label string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.owner != nil {
+		if c.owner.id == id {
+			return stateGranted // 本来就是他在控制
+		}
+		return stateBusy
+	}
+	if c.pending != nil {
+		if c.pending.id != id {
+			return stateBusy
+		}
+		// 自己在排队 —— 升格为控制者,等价于 approve 走了一遍。
+		c.owner = c.pending
+		c.pending = nil
+		return stateGranted
+	}
+
+	c.owner = &waiter{id: id, label: label, at: time.Now()}
+	return stateGranted
+}
+
 // approve 把控制权交给正在等批准的那个会话。
 func (c *control) approve(id string) bool {
 	c.mu.Lock()

@@ -667,8 +667,12 @@ func TestManualHintMentionsRemoteControlPort(t *testing.T) {
 	}
 }
 
-// 成功路径的防火墙提示同样要提到远控端口。
-func TestActiveHintMentionsRemoteControlPort(t *testing.T) {
+// 成功路径不留 Hint。
+//
+// 以前这里挂着一句"自动映射成功不等于一定可达,请放行防火墙…",界面上被
+// 去掉了(那一行是状态,不是问题;要放行哪些端口写在 README 和公网部署手册里)。
+// 这条测试就是钉住这件事:失败路径该给建议,成功路径不该。
+func TestActiveHasNoHint(t *testing.T) {
 	svc := newFake("203.0.113.7")
 	gw := fakeGateway(svc)
 
@@ -685,8 +689,8 @@ func TestActiveHintMentionsRemoteControlPort(t *testing.T) {
 	if snap.State != StateActive {
 		t.Fatalf("状态 = %s,想要 active(消息:%s)", snap.State, snap.Message)
 	}
-	if !strings.Contains(snap.Hint, "8090") {
-		t.Errorf("防火墙提示里没有远控端口:%q", snap.Hint)
+	if snap.Hint != "" {
+		t.Errorf("映射成功时不该有提示,得到 %q", snap.Hint)
 	}
 }
 

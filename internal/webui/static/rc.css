@@ -87,6 +87,17 @@ body.rc {
 
 .rc-spacer { flex: 1; }
 
+/* 控制密码框:只在主机设了密码时才出现(见 rc.js 的 hello 分支)。
+   app.css 里那套输入框样式是 width:100%(给控制页的表单用的),在工具条
+   里要把这个覆盖掉,否则它会把「申请控制」按钮挤到下一行。 */
+#pwInput {
+  width: auto;
+  flex: 0 1 160px;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
 #ctlInfo {
   font-size: 12px;
 }

@@ -114,6 +114,19 @@ type RemoteControlConfig struct {
 	// 单独一个开关而不是跟着 Enabled 走:剪贴板会把手边的密码、验证码
 	// 之类的东西送出去,这个决定应该由用户单独做一次。
 	AllowClipboard bool `json:"allowClipboard,omitempty"`
+
+	// ControlPassword 是"自动批准"用的固定暗号。设了之后,观众在观看页
+	// 填对它的那次申请直接拿到控制权,不必等主机当场点批准;填错或没填
+	// 的仍然走原来的"主机当场批准"。
+	//
+	// 也就是说它是第二层的一条**捷径**,不是把第二层去掉 —— 不设密码时
+	// 行为一个字不变。
+	//
+	// **明文存是有意的**:这个密码的用法是和对方约定一个暗号,主机需要
+	// 在控制页上把它看一眼、复制给对方,存哈希就没法显示了。风险有界 ——
+	// 远控端口本身要 256 位链接令牌才连得上,而这个值只决定"要不要麻烦
+	// 主机点一下",拿到它并不等于绕开第一层。
+	ControlPassword string `json:"controlPassword,omitempty"`
 }
 
 // MappedPort 返回这个远控配置需要在路由器上开的端口;关着的时候返回 0,
@@ -300,6 +313,18 @@ func (c *Config) Normalize() {
 	// 重新生成。宁可让旧链接失效,也不要拿一个弱令牌当凭据。
 	if len(c.RemoteControl.Token) < 32 {
 		c.RemoteControl.Token = ""
+	}
+
+	// 控制密码去掉首尾空白。**这一步是必须的,不是为了好看**:密码框里
+	// 多带一个空格(从别处粘贴时很常见)在界面上看不出来,而填密码的人
+	// 永远对不上 —— 表现为"密码明明是对的,就是不通过"。
+	//
+	// 长度上限只是兜底:正常暗号不会这么长,到这个量级说明文件写坏了。
+	// 和上面令牌那条同一个处理方式 —— 宁可让用户重新设一次,也不要拿一个
+	// 来路不明的值当凭据。
+	c.RemoteControl.ControlPassword = strings.TrimSpace(c.RemoteControl.ControlPassword)
+	if len(c.RemoteControl.ControlPassword) > 256 {
+		c.RemoteControl.ControlPassword = ""
 	}
 	// 没有公网地址就无所谓"是不是自动写的"。不归零的话,用户清空地址之后
 	// 这个标记会一直挂着,下次自动写入时看不出区别,但配置读起来是矛盾的。

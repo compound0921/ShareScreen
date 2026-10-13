@@ -467,10 +467,14 @@ func (m *Mapper) sync(st *runState) time.Duration {
 		// 从界面上确认远控端口到底开没开(实测就是被问到过这件事)。
 		s.Message = fmt.Sprintf("自动映射已生效 · 外网地址 %s · 已开端口 %s",
 			HostPort(externalIP, rules[0].ExternalPort), portList(rules))
-		s.Hint = fmt.Sprintf(
-			"自动映射成功不等于一定可达。请放行 Windows 防火墙的 %s,"+
-				"然后关掉手机 WiFi、用 4G 打开公网链接验证一次。",
-			portList(rules))
+		// 成功时不留 Hint:这一行只是"映射开好了"的状态,不是问题。
+		// 防火墙要放行哪些端口、怎么验证公网可达,写在 README 的
+		// 「让公网也能看」一节和 docs/公网部署手册.md 里 —— 界面上的每一句
+		// 解释都在稀释那几行真正要看的数字。
+		//
+		// 失败路径照样给 Hint(见 manualHint):那里说的是"那你现在怎么办",
+		// 和这里的性质不一样。
+		s.Hint = ""
 	})
 
 	if notify && m.opts.OnChange != nil {

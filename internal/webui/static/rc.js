@@ -20,6 +20,7 @@ const els = {
   startBtn: document.getElementById('startBtn'),
   status: document.getElementById('status'),
   ctlBtn: document.getElementById('ctlBtn'),
+  pwInput: document.getElementById('pwInput'),
   releaseBtn: document.getElementById('releaseBtn'),
   ctlInfo: document.getElementById('ctlInfo'),
   muteBtn: document.getElementById('muteBtn'),
@@ -246,6 +247,10 @@ function handleMsg(m) {
       // 主机没开剪贴板同步就整个藏起来 —— 显示一个点了没反应的按钮
       // 比不显示更让人困惑。
       els.clipBtn.hidden = !m.clipboard;
+      // 密码框同理:主机没设密码时,摆一个填了也没用的框只会让人以为
+      // 必须先填点什么才能申请。填了框里的东西跟申请一起送上去,主机
+      // 那侧比对通过就直接给控制权,不用他点允许。
+      els.pwInput.hidden = !m.passwordSet;
       break;
 
     case 'ctl':
@@ -272,9 +277,13 @@ function applyCtlState(s, reason) {
     case 'pending':
       setControlling(false);
       setStatus('等待主机允许…', 'badge-warn');
-      els.ctlBtn.hidden = true;
-      els.releaseBtn.hidden = false;
-      els.ctlInfo.textContent = '主机屏幕上会出现批准提示,请稍候';
+      // 有 reason 表示这次是"密码填错了,顺带也在排队等批准"。这时候
+      // 把「申请控制」留着 —— 改一个密码再点一次是有意义的(主机那侧
+      // 会把同一个人的排队升格成控制权,不是重新排一遍)。正常排队时
+      // 藏起来,免得手一抖重复申请。
+      els.ctlBtn.hidden = !reason;
+      els.releaseBtn.hidden = !!reason;
+      els.ctlInfo.textContent = reason || '主机屏幕上会出现批准提示,请稍候';
       break;
 
     case 'busy':
@@ -330,7 +339,11 @@ function setControlling(on) {
   }
 }
 
-els.ctlBtn.addEventListener('click', () => send({ t: 'ctl', act: 'request' }));
+els.ctlBtn.addEventListener('click', () => {
+  // 密码留空也要发:那是"不填密码,走主机批准"这条正常路径。主机那侧
+  // 对空密码一律不匹配(见 remotectl 的 passwordMatch),不会误放行。
+  send({ t: 'ctl', act: 'request', pw: els.pwInput.value });
+});
 els.releaseBtn.addEventListener('click', () => send({ t: 'ctl', act: 'release' }));
 
 // ───────────────────────── 坐标映射 ─────────────────────────

@@ -3,6 +3,8 @@ package remotectl
 import (
 	"log"
 
+	"github.com/coder/websocket"
+
 	"sharescreen/internal/clipboard"
 	"sharescreen/internal/input"
 )
@@ -22,12 +24,72 @@ func (s *Server) dispatch(sess *session, m clientMsg) {
 	}
 }
 
+// maxPwFails 是单条连接上控制密码能连错几次。
+//
+// 令牌是 256 位随机值,猜不中,所以 /ws 上没有失败次数限流(见 auth.go)。
+// 密码是人选的、可能很短,**重复猜是有意义的** —— 所以这条路上要有个闸。
+//
+// 8 次:手滑、大小写、记错一个字符,这么多次都足够纠正过来;再往后就是在
+// 枚举了。断连而不是锁定:断掉的是一条连接,对方拿令牌重连即可重来,而
+// 我们这边不维护任何跨连接的封禁状态 —— 那种状态既有内存增长问题,
+// 又会在合法的那个同伴被误伤时很难自证。
+//
+// 明确一下这个计数**不**打算做到的事:它拦不住铁了心枚举的人(重连是免费的),
+// 它挡的是"一个拿到了链接的人在密码框里乱试"。真正让人不敢硬猜的是另外两件:
+// 第一层的令牌(没有它连不上来),以及每一次猜错都会在主机屏幕上敲一次门 ——
+// 猜错走的是普通的"申请 → 待批准",主机看到那个弹窗就能拒绝、就能收回控制权。
+const maxPwFails = 8
+
 // handleCtl 处理控制权协商。
 func (s *Server) handleCtl(sess *session, m clientMsg) {
 	switch m.Act {
 	case actRequest:
-		state := s.control.request(sess.id, sess.label)
-		sess.write(serverMsg{Type: msgCtl, State: state, Reason: stateReason(state)})
+		pw := s.currentPassword()
+		// 主机没设密码时 pw 是空串,passwordMatch 一律不匹配 ——
+		// 于是这里自然退回"申请 → 主机批准"那条老路。
+		authOK := pw != "" && passwordMatch(pw, m.Pw)
+
+		var state string
+		if authOK {
+			state = s.control.grantIfFree(sess.id, sess.label)
+		} else {
+			state = s.control.request(sess.id, sess.label)
+		}
+
+		wrongPw := pw != "" && m.Pw != "" && !authOK
+
+		if authOK {
+			// 密码对了,失败计数就清零 —— 哪怕最后没轮到他(有人正在控制),
+			// 那也是"密码没错",下一次不该接着上次数算。
+			sess.pwFails = 0
+
+			// 而且没和别人撞上 —— 直接就是控制者了,不经过批准。
+			if state == stateGranted {
+				s.grant(sess)
+				log.Printf("远程控制:%s 控制密码通过,已自动批准", sess.label)
+				s.notify()
+				return
+			}
+		} else if wrongPw {
+			// 只有"主机设了密码 + 对方确实填了"才算一次失败 ——
+			// 完全没填是正常用法(等人批准),不该计入。
+			sess.pwFails++
+			if sess.pwFails >= maxPwFails {
+				log.Printf("远程控制:%s 控制密码连续错误 %d 次,断开", sess.label, sess.pwFails)
+				sess.write(serverMsg{Type: "err", Code: errAuth, Msg: "控制密码连续错误太多次"})
+				sess.close()
+				_ = sess.conn.Close(websocket.StatusPolicyViolation, "控制密码错误")
+				return
+			}
+		}
+
+		reason := stateReason(state)
+		if state == statePending && wrongPw {
+			// 这里是"排队等批准"之上的额外说明,不是拒绝 —— 让他知道
+			// 密码填错了,可以改一个再试,也可以原地等主机点允许。
+			reason = "控制密码不正确,可以改一个再试,或者等主机批准"
+		}
+		sess.write(serverMsg{Type: msgCtl, State: state, Reason: reason})
 		if state == statePending {
 			log.Printf("远程控制:%s 申请控制权,等待主机批准", sess.label)
 		}
