@@ -144,16 +144,27 @@ func (c *control) revoke() (id string, ok bool) {
 	return id, true
 }
 
-// release 是观众主动归还控制权。
-func (c *control) release(id string) bool {
+// release 是观众主动放弃:正在控制就交回控制权,还在排队就撤掉申请。
+//
+// 两件事合在一个方法里,因为观众那一侧只有**一个**按钮 —— 它必须永远可用、
+// 点了永远有回应。分成两个动作的话,"取消申请"那条路会收到一句"你不是控制者"
+// 之类的拒绝,而拒绝里没有任何他能做的事:他就是要撤掉那份申请。
+//
+// 返回值:wasOwner 说明撤掉的是控制权还是排队(回给观众的措辞不一样),
+// ok 为假表示这个会话两样都不占 —— 那才是真的无事可做。
+func (c *control) release(id string) (wasOwner, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.owner == nil || c.owner.id != id {
-		return false
+	if c.owner != nil && c.owner.id == id {
+		c.owner = nil
+		return true, true
 	}
-	c.owner = nil
-	return true
+	if c.pending != nil && c.pending.id == id {
+		c.pending = nil
+		return false, true
+	}
+	return false, false
 }
 
 // drop 在连接断开时清理这个会话占的位置。

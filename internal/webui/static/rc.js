@@ -25,6 +25,17 @@ const els = {
   ctlInfo: document.getElementById('ctlInfo'),
   muteBtn: document.getElementById('muteBtn'),
   fullBtn: document.getElementById('fullBtn'),
+  bar: document.getElementById('bar'),
+  corner: document.getElementById('corner'),
+  hudBtn: document.getElementById('hudBtn'),
+  exitImmersive: document.getElementById('exitImmersive'),
+  kbSysBtn: document.getElementById('kbSysBtn'),
+  kbPadBtn: document.getElementById('kbPadBtn'),
+  rclickBtn: document.getElementById('rclickBtn'),
+  keyPad: document.getElementById('keyPad'),
+  keyPadGrid: document.getElementById('keyPadGrid'),
+  keyPadClose: document.getElementById('keyPadClose'),
+  typing: document.getElementById('typing'),
   err: document.getElementById('err'),
 
   clipBtn: document.getElementById('clipBtn'),
@@ -277,12 +288,15 @@ function applyCtlState(s, reason) {
     case 'pending':
       setControlling(false);
       setStatus('等待主机允许…', 'badge-warn');
-      // 有 reason 表示这次是"密码填错了,顺带也在排队等批准"。这时候
-      // 把「申请控制」留着 —— 改一个密码再点一次是有意义的(主机那侧
-      // 会把同一个人的排队升格成控制权,不是重新排一遍)。正常排队时
-      // 藏起来,免得手一抖重复申请。
+      // 排队中,那个按钮的身份是"取消申请" —— 而且它真的能取消(服务端
+      // 的 release 认排队中的会话,见 internal/remotectl)。所以它必须一直
+      // 在:等不到回应、或者想改个密码重来时,用户得有路可退。
+      //
+      // 「申请控制」只在密码填错那次留着(那时 reason 非空),改一个再点一次
+      // 是有意义的 —— 主机那侧会把同一个人的排队升格成控制权,而不是重排。
       els.ctlBtn.hidden = !reason;
-      els.releaseBtn.hidden = !!reason;
+      els.releaseBtn.textContent = '取消请求';
+      els.releaseBtn.hidden = false;
       els.ctlInfo.textContent = reason || '主机屏幕上会出现批准提示,请稍候';
       break;
 
@@ -307,7 +321,9 @@ function applyCtlState(s, reason) {
 
     case 'idle':
       setControlling(false);
-      els.ctlInfo.textContent = '';
+      // 归还是"已归还控制权"、撤回申请是"已取消申请" —— 得说出来,
+      // 否则点完取消之后界面只是按钮变回「申请控制」,像是没反应。
+      els.ctlInfo.textContent = reason || '';
       els.ctlBtn.hidden = false;
       els.releaseBtn.hidden = true;
       break;
@@ -324,13 +340,28 @@ function setControlling(on) {
     releaseAllButtons();
     releaseAllKeys();
     pendingMove = null;
+    // 输入类的东西全部收回去:软键盘、系统键盘、「右键」开关、还亮着的
+    // 修饰键。留着的话,下次拿到控制权时它们会带着上一次的状态回来 ——
+    // 比如 Ctrl 还亮着,而用户早就忘了自己点过它。
+    setRightArmed(false);
+    closeKeyPad();
+    blurSoftKeyboard();
+    clearMods();
   }
 
   state.controlling = on;
 
   els.video.classList.toggle('controlling', on);
   els.releaseBtn.hidden = !on;
+  // 拿到控制权之后,那个按钮的身份才是"归还"(排队中是"取消申请",
+  // 见 applyCtlState 的 pending 分支)。
+  if (on) els.releaseBtn.textContent = '归还控制';
   els.ctlBtn.hidden = on;
+  // 这三个只在控制中才有意义 —— 没控制权时敲了也送不出去,摆着只会让人
+  // 以为坏了(和剪贴板按钮同一个道理)。
+  els.kbSysBtn.hidden = !on;
+  els.kbPadBtn.hidden = !on;
+  els.rclickBtn.hidden = !on;
 
   if (on) {
     setStatus('控制中', 'badge-warn');
@@ -426,7 +457,15 @@ function releaseAllButtons() {
     send({ t: 'in', k: 'btn', b, down: false });
   }
   pressed.clear();
+  gestureButton = null;
 }
+
+// gestureButton 是这一次"按下"实际用的是哪个键。
+//
+// 必须记下来,不能等到 pointerup 再读 e.button:触摸屏上没有右键,
+// 「右键」开关会把这次点击**改**成右键(见 setRightArmed),而 pointerup
+// 报回来的仍然是 0。不记的话,抬起的就是左键 —— 主机那边的右键会一直按着。
+let gestureButton = null;
 
 video.addEventListener('pointerdown', (e) => {
   if (!state.controlling) return;
@@ -439,16 +478,28 @@ video.addEventListener('pointerdown', (e) => {
   const p = normalize(e.clientX, e.clientY);
   send({ t: 'in', k: 'mv', x: p.x, y: p.y });
 
-  pressed.add(e.button);
-  send({ t: 'in', k: 'btn', b: e.button, down: true });
+  // 「右键」开关亮着的时候,把这一次左键点击换成右键,然后开关自己灭掉。
+  // 只换左键:鼠标本来的中键/右键照旧,不去动它们。
+  let btn = e.button;
+  if (rightArmed && btn === 0) {
+    btn = 2;
+    setRightArmed(false);
+  }
+
+  gestureButton = btn;
+  pressed.add(btn);
+  send({ t: 'in', k: 'btn', b: btn, down: true });
 });
 
 video.addEventListener('pointerup', (e) => {
   if (!state.controlling) return;
   e.preventDefault();
   try { video.releasePointerCapture(e.pointerId); } catch { /* 同上 */ }
-  pressed.delete(e.button);
-  send({ t: 'in', k: 'btn', b: e.button, down: false });
+  // 抬起用按下时记下的那个键,不是 e.button —— 理由见 gestureButton。
+  const btn = gestureButton != null ? gestureButton : e.button;
+  pressed.delete(btn);
+  gestureButton = null;
+  send({ t: 'in', k: 'btn', b: btn, down: false });
 });
 
 // 指针被系统抢走:不知道松开的是哪个键,干脆全松开 —— 多抬一个没按的
@@ -496,6 +547,11 @@ document.addEventListener('keyup', (e) => { onKey(e, false); });
 function onKey(e, down) {
   if (!state.controlling) return;
 
+  // 焦点在"系统软键盘把手"上的时候,这条路由它自己的监听器负责。
+  // 不挡的话,软键盘每敲一个字都会走两遍:一遍是 typing 的 input,
+  // 一遍是这里冒泡上来的 keydown —— 主机上就是每个字打两遍。
+  if (e.target === els.typing) return;
+
   // 主机那边的"刹车"不能被观众按掉,浏览器也拦不住这些组合键;
   // 与其让观众以为按了有用,不如不放行。
   if (e.key === 'F5' || e.key === 'F11' || e.key === 'F12') return;
@@ -528,13 +584,326 @@ function releaseAllKeys() {
 
 // ───────────────────────── 工具条 ─────────────────────────
 
-els.fullBtn.addEventListener('click', () => {
-  if (document.fullscreenElement) {
-    document.exitFullscreen();
-  } else {
-    document.documentElement.requestFullscreen().catch(() => {});
+// ───────────────────────── 沉浸模式(软全屏) ─────────────────────────
+//
+// 主体是 CSS 撑满(body.rc.immersive,见 rc.css),**不**依赖系统全屏。
+// 三条理由,都是实测/标准层面的硬约束:
+//
+//   · 进了系统全屏之后,从屏幕顶部往下拖是系统级的"退出全屏"手势,网页
+//     拦不住 —— WebKit 明确答复过 preventDefault 和 touch-action: none
+//     都不行(bug 264215),它和按 Esc、点关闭按钮一样是反钓鱼设计。而
+//     这个页面的核心操作就是按住把鼠标往下拖 —— 一次拖拽就被踢出全屏,
+//     那次操作也就断了。
+//   · iPhone 的 Safari 根本不支持元素的 requestFullscreen(只有 iPadOS
+//     支持),原来那个按钮在 iPhone 上是静默失效的 —— 失败被 .catch 吃掉。
+//   · 而原来那个「全屏」按钮就在工具条里,工具条一到全屏就被藏起来
+//     (见 rc.css 的 @media (display-mode: fullscreen))—— 等于进了全屏
+//     就没有退出口,只剩那个手势。现在退出口是浮在画面上的,不再跟着藏。
+//
+// 代价:不进系统全屏,浏览器自己的工具条就还在(手机上尤其明显)。标签页里
+// 没有办法去掉它,这是苹果的限制;要彻底没有,只有"添加到主屏幕"那条路。
+//
+// 例外:**有鼠标的设备仍然进一次系统全屏** —— 那里没有触摸手势的冲突,
+// 白拿一块浏览器边框,不要白不要。这判断用的是能力媒体查询,不是猜 UA。
+const wantsSystemFullscreen =
+  window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
+function isImmersive() {
+  return document.body.classList.contains('immersive');
+}
+
+function setImmersive(on) {
+  document.body.classList.toggle('immersive', on);
+  els.corner.hidden = !on;
+  // 每次进出都恢复成"工具条可见"。尤其是退出的时候 —— 否则收着工具条退出,
+  // 回到小窗口连按钮都找不着了,而那时右上角那组浮标也已经跟着藏了。
+  setHudVisible(true);
+
+  if (on) {
+    if (wantsSystemFullscreen) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    }
+  } else if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  }
+}
+
+// setHudVisible 收起/展开下面那条工具条。
+//
+// 收起是给"要全画面看东西"用的:那条 HUD 虽然只有一行,但一直压着画面底部。
+// 右上角那组浮标不跟着收 —— 不然就没有东西能把它叫回来了。
+function setHudVisible(on) {
+  els.bar.hidden = !on;
+  els.hudBtn.textContent = on ? '收起' : '展开';
+}
+
+els.fullBtn.addEventListener('click', () => setImmersive(!isImmersive()));
+els.exitImmersive.addEventListener('click', () => setImmersive(false));
+els.hudBtn.addEventListener('click', () => setHudVisible(els.bar.hidden));
+
+// 桌面按 Esc / 浏览器自己的退出按钮会退出系统全屏,而那是浏览器自己处理的,
+// 我们收不到按键。不听这一下,工具条会一直藏着、浮出来的退出口又已经跟着
+// 消失,人就真被关在里面了。
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && isImmersive()) setImmersive(false);
+});
+
+// ───────────────────────── 右键开关 ─────────────────────────
+//
+// 触摸屏上没有右键。这个开关亮着的时候,下一次点击按右键发出去,然后它自己
+// 灭掉(见 pointerdown)。
+//
+// 为什么不做成"长按 = 右键"或者"双指轻点 = 右键":
+//
+//   · 长按:得等半秒才出右键,而且手指"慢慢起步"的那种拖拽会被误判成
+//     右键 —— 而拖拽恰恰是这个页面的主要操作。
+//   · 双指轻点:要认出第二根手指,就只能把**每一次单击**都先压后一小段
+//     时间再发。那是给所有操作都加延迟,在远控里比多点一个按钮贵得多。
+//
+// 一次性开关不欠任何账:不点它,点击一点没变;点了它,下一次点就是右键。
+let rightArmed = false;
+
+function setRightArmed(on) {
+  rightArmed = on;
+  els.rclickBtn.classList.toggle('on', on);
+}
+
+els.rclickBtn.addEventListener('click', () => setRightArmed(!rightArmed));
+
+// ─────────────── 系统软键盘(iPadOS / Android 自带的那个) ───────────────
+//
+// iOS 只在**真正的输入框**拿到焦点时才弹键盘,所以页面上必须有一个能聚焦
+// 的东西 —— 就是 rc.html 里那个 .rc-typing:1 像素、全透明,看得见的是
+// 键盘,不是它。
+//
+// 它里面**一个字都不留**:每收到一次输入就把内容取走、发给主机、清空。
+// 留着就要维护光标位置、选区和"这次新增了什么",而主机那边要的是按键,
+// 不是一份文本。
+let composing = false;
+
+// flushTyping 把输入框里现在的内容当文本发出去,然后清空。
+function flushTyping() {
+  const s = els.typing.value;
+  els.typing.value = '';
+  if (s) send({ t: 'in', k: 'txt', s });
+}
+
+els.typing.addEventListener('compositionstart', () => { composing = true; });
+els.typing.addEventListener('compositionend', () => {
+  composing = false;
+  flushTyping(); // 中文输入的整个词,到这里才送出去
+});
+
+els.typing.addEventListener('input', () => {
+  // 输入法正在拼的时候,框里是拼音字母,不是用户要打的字。这时候发出去,
+  // 主机上会先冒出一串拼音再被中文替换 —— 等 compositionend 再说。
+  if (composing) return;
+  flushTyping();
+});
+
+els.typing.addEventListener('keydown', (e) => {
+  // 回车和退格不产生文本,也不会出现在 input 事件里 —— 空框上的退格连
+  // 内容都没得删,只有 keydown 认得出。
+  //
+  // 这一条按 iPadOS 做:那里的 Safari 会照实报 key='Backspace'/'Enter'。
+  // 安卓的软键盘常常把它们报成 keyCode 229(Unidentified),要另外绕,
+  // 暂时不管 —— 这个功能的第一个目标是 iPad。
+  if (e.key === 'Backspace' || e.key === 'Enter') {
+    e.preventDefault();
+    sendKey(e.key);
   }
 });
+
+els.typing.addEventListener('focus', () => els.kbSysBtn.classList.add('on'));
+els.typing.addEventListener('blur', () => els.kbSysBtn.classList.remove('on'));
+
+function blurSoftKeyboard() {
+  if (document.activeElement === els.typing) els.typing.blur();
+}
+
+els.kbSysBtn.addEventListener('click', () => {
+  if (document.activeElement === els.typing) {
+    blurSoftKeyboard();
+    return;
+  }
+  closeKeyPad(); // 两个键盘不同时开,否则屏幕剩不下多少画面
+  els.typing.value = '';
+  els.typing.focus();
+});
+
+// ─────────────── 软键盘(页面里自己画的这个) ───────────────
+//
+// 它补的是系统软键盘给不了的那部分:Ctrl/Alt/Shift/Win、Tab、Esc、方向键、
+// Del/Home/End/PgUp/PgDn。字母数字也画上了,所以不打字时也能完全靠它。
+//
+// 键名用的是 KeyboardEvent.code,和主机那张映射表(internal/input/keys.go)
+// 是同一套名字 —— 名字对不上就是"按下去没反应",而那种 bug 在真机上很难查。
+//
+// 布局是数据:往 KEY_ROWS 里加一行就多一行键。
+const KEY_ROWS = [
+  ['Escape', 'Tab', 'ControlLeft', 'AltLeft', 'ShiftLeft', 'MetaLeft'],
+  ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6',
+   'Digit7', 'Digit8', 'Digit9', 'Digit0', 'Minus', 'Equal', 'Backspace'],
+  ['KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT', 'KeyY', 'KeyU', 'KeyI', 'KeyO',
+   'KeyP', 'BracketLeft', 'BracketRight'],
+  ['KeyA', 'KeyS', 'KeyD', 'KeyF', 'KeyG', 'KeyH', 'KeyJ', 'KeyK', 'KeyL',
+   'Semicolon', 'Quote', 'Enter'],
+  ['KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyB', 'KeyN', 'KeyM',
+   'Comma', 'Period', 'Slash'],
+  ['ArrowLeft', 'ArrowUp', 'ArrowDown', 'ArrowRight', 'Space',
+   'Delete', 'Home', 'End', 'PageUp', 'PageDown'],
+];
+
+const KEY_LABELS = {
+  Escape: 'Esc', Tab: 'Tab', ControlLeft: 'Ctrl', AltLeft: 'Alt',
+  ShiftLeft: 'Shift', MetaLeft: 'Win', Backspace: '⌫', Enter: '⏎',
+  Space: '空格', Delete: 'Del', Home: 'Home', End: 'End',
+  PageUp: 'PgUp', PageDown: 'PgDn',
+  ArrowLeft: '←', ArrowUp: '↑', ArrowDown: '↓', ArrowRight: '→',
+  Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
+  Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/',
+};
+
+// 宽一点的键才像键盘
+const KEY_WIDTH = { Backspace: 'w2', Enter: 'w2', Space: 'w6' };
+
+// 修饰键:点一下亮起(下一个键带上它),不直接发出去。
+const MOD_CODES = new Set(['ControlLeft', 'AltLeft', 'ShiftLeft', 'MetaLeft']);
+
+const mods = new Set();
+
+// 按住 Shift 时上面那两排变成什么。字母靠 toUpperCase,只要列符号。
+const SHIFT_DIGITS = {
+  '1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+  '6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+};
+const SHIFT_PUNCT = {
+  Minus: ['-', '_'], Equal: ['=', '+'],
+  BracketLeft: ['[', '{'], BracketRight: [']', '}'],
+  Semicolon: [';', ':'], Quote: ["'", '"'],
+  Comma: [',', '<'], Period: ['.', '>'], Slash: ['/', '?'],
+};
+
+function keyLabel(code) {
+  if (KEY_LABELS[code]) return KEY_LABELS[code];
+  if (code.startsWith('Key')) return code[3].toLowerCase();
+  if (code.startsWith('Digit')) return code[5];
+  return code;
+}
+
+// keyText 返回这个键在不按 Ctrl/Alt/Win 时该送出去的**文本**;
+// 方向键、Tab、Esc 这类没有文本含义的返回 null,表示只能走键码。
+function keyText(code, shift) {
+  if (code.length === 4 && code.startsWith('Key')) {
+    const c = code[3].toLowerCase();
+    return shift ? c.toUpperCase() : c;
+  }
+  if (code.length === 6 && code.startsWith('Digit')) {
+    const d = code[5];
+    return shift ? SHIFT_DIGITS[d] : d;
+  }
+  if (code === 'Space') return ' ';
+  const p = SHIFT_PUNCT[code];
+  if (p) return shift ? p[1] : p[0];
+  return null;
+}
+
+function sendKeyDown(code, down) {
+  send({ t: 'in', k: 'key', code, down });
+}
+
+// sendKey 是一次完整的"按下再抬起",给退格、回车这种单独一个键用的。
+function sendKey(code) {
+  sendKeyDown(code, true);
+  sendKeyDown(code, false);
+}
+
+function refreshMods() {
+  for (const b of els.keyPadGrid.querySelectorAll('.rc-key')) {
+    if (MOD_CODES.has(b.dataset.code)) {
+      b.classList.toggle('on', mods.has(b.dataset.code));
+    }
+  }
+}
+
+function clearMods() {
+  mods.clear();
+  refreshMods();
+}
+
+function tapKey(code) {
+  if (!state.controlling) return;
+
+  // 修饰键只切换亮灭,不发出去 —— 单独按下 Ctrl 在主机上什么也不该发生。
+  if (MOD_CODES.has(code)) {
+    if (mods.has(code)) mods.delete(code);
+    else mods.add(code);
+    refreshMods();
+    return;
+  }
+
+  const combo = mods.has('ControlLeft') || mods.has('AltLeft') || mods.has('MetaLeft');
+  const text = combo ? null : keyText(code, mods.has('ShiftLeft'));
+
+  if (text !== null) {
+    // 能算成文本就走文本通道。走键码的话,主机要按**它自己的**键盘布局
+    // 再解释一遍,布局不一样就会打错字(见 onKey 里那段说明)。
+    send({ t: 'in', k: 'txt', s: text });
+  } else {
+    // 组合键只能走键码 —— Ctrl+C 这种东西在文本通道里表达不出来。
+    const held = [...mods];
+    for (const m of held) sendKeyDown(m, true);
+    sendKeyDown(code, true);
+    sendKeyDown(code, false);
+    for (const m of held.reverse()) sendKeyDown(m, false);
+  }
+
+  // 修饰键按完即灭。粘着不放的话,用户会莫名其妙地一直在按 Ctrl,
+  // 而且没有任何提示告诉他为什么。
+  clearMods();
+}
+
+function buildKeyPad() {
+  for (const row of KEY_ROWS) {
+    const line = document.createElement('div');
+    line.className = 'rc-keys-row';
+    for (const code of row) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'rc-key';
+      if (KEY_WIDTH[code]) b.classList.add(KEY_WIDTH[code]);
+      b.dataset.code = code;
+      b.textContent = keyLabel(code);
+      // pointerdown 而不是 click:键盘要的是"按下去就发"。等 click 等于
+      // 等到手指抬起来,手感上慢一拍。
+      b.addEventListener('pointerdown', (e) => {
+        e.preventDefault(); // 别让浏览器把这次触摸当成滚动/缩放
+        tapKey(code);
+      });
+      line.appendChild(b);
+    }
+    els.keyPadGrid.appendChild(line);
+  }
+}
+
+buildKeyPad();
+
+function closeKeyPad() {
+  els.keyPad.hidden = true;
+  els.kbPadBtn.classList.remove('on');
+}
+
+els.kbPadBtn.addEventListener('click', () => {
+  if (!els.keyPad.hidden) {
+    closeKeyPad();
+    return;
+  }
+  blurSoftKeyboard(); // 同理,两个键盘不叠在一起
+  els.keyPad.hidden = false;
+  els.kbPadBtn.classList.add('on');
+});
+
+els.keyPadClose.addEventListener('click', closeKeyPad);
 
 els.muteBtn.addEventListener('click', () => {
   els.video.muted = !els.video.muted;

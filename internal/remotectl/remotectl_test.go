@@ -59,16 +59,17 @@ func TestControlRevokeAndRelease(t *testing.T) {
 	c.request("a", "10.0.0.1")
 	c.approve("a")
 
-	if c.release("b") {
-		// b 不是控制者,归还应当无效
-		t.Fatal("非控制者归还不该成功")
+	if _, ok := c.release("b"); ok {
+		// b 既不在控制也没排队,放弃应当无效
+		t.Fatal("没占任何位置的会话放弃不该成功")
 	}
 	if c.holder() != "a" {
-		t.Fatal("非控制者归还后控制者不该变")
+		t.Fatal("别人的放弃后控制者不该变")
 	}
 
-	if !c.release("a") {
-		t.Fatal("控制者归还应成功")
+	wasOwner, ok := c.release("a")
+	if !ok || !wasOwner {
+		t.Fatal("控制者归还应成功,并报告自己是控制者")
 	}
 	if c.holder() != "" {
 		t.Fatal("归还后不该还有控制者")
@@ -153,6 +154,45 @@ func TestControlSnapshot(t *testing.T) {
 	}
 	if pending != nil {
 		t.Fatalf("批准之后不该还有待批准项: %+v", pending)
+	}
+}
+
+// TestControlCancelPending 是"取消申请":排队的人主动撤掉。
+//
+// 这条以前是坏的 —— release 只认控制者,排队的人点那个按钮,服务端什么
+// 也不做,而界面上那个按钮就在他眼前。它必须真的把名额放开,否则别人
+// (以及他自己)在超时之前都申请不了。
+func TestControlCancelPending(t *testing.T) {
+	var c control
+	c.request("a", "10.0.0.1")
+
+	wasOwner, ok := c.release("a")
+	if !ok {
+		t.Fatal("排队者撤回申请应当成功")
+	}
+	if wasOwner {
+		t.Fatal("排队的人不是控制者,不该被当成归还控制权")
+	}
+	if _, pending := c.snapshot(); pending != nil {
+		t.Fatalf("撤回之后不该还挂在待批准里: %+v", pending)
+	}
+	// 名额要放开:别人现在能申请了
+	if got := c.request("b", "10.0.0.2"); got != statePending {
+		t.Fatalf("撤回之后名额应当放开,得到 %q", got)
+	}
+}
+
+// 撤回的是自己的那份,不能顺手把别人正在等的申请也撤掉。
+func TestControlCancelPendingDoesNotTouchOthers(t *testing.T) {
+	var c control
+	c.request("a", "10.0.0.1")
+
+	if _, ok := c.release("b"); ok {
+		t.Fatal("没排队的人放弃不该成功")
+	}
+	owner, pending := c.snapshot()
+	if owner != "" || pending == nil || pending.RemoteIP != "10.0.0.1" {
+		t.Fatalf("a 的申请不该被动到: owner=%q pending=%+v", owner, pending)
 	}
 }
 

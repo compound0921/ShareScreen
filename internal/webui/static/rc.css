@@ -4,10 +4,19 @@
 body.rc {
   /* 控制页给 body 留了页边距,那是给卡片用的;观看页要铺满。 */
   padding: 0;
+  /* dvh 而不是只有 vh:iOS 上 vh 指的是地址栏收起时的那个大高度,地址栏一
+     露出来内容就被挤掉一截(而且多半正好发生在拖拽途中,表现为画面忽然
+     跳一下)。dvh 跟着实际可视高度走。不认 dvh 的浏览器退回上一行的 vh。 */
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 吃掉"下拉刷新"那种橡皮筋:拖画面的方向和下拉刷新是同一个(见 rc.js
+     里沉浸模式那段),不拦一下,一次向下的拖拽还是会去拽页面。
+     iOS 各版本对这条的支持不一致(Safari 16 起才认,而且只作用在滚动容器
+     上),所以它只是"少一件事来捣乱",不能当成保证 —— 真机上还要看一眼。 */
+  overscroll-behavior: none;
 }
 
 /* ── 画面区 ── */
@@ -87,6 +96,11 @@ body.rc {
 
 .rc-spacer { flex: 1; }
 
+/* hidden 属性在浏览器默认样式里是 display: none,但上面 #bar 那条作者样式
+   写了 display: flex —— 作者样式永远赢过默认样式,所以光设 el.hidden = true
+   是藏不掉的(这是 hidden 最常见的坑)。自己补一条。 */
+#bar[hidden] { display: none; }
+
 /* 控制密码框:只在主机设了密码时才出现(见 rc.js 的 hello 分支)。
    app.css 里那套输入框样式是 width:100%(给控制页的表单用的),在工具条
    里要把这个覆盖掉,否则它会把「申请控制」按钮挤到下一行。 */
@@ -102,6 +116,165 @@ body.rc {
   font-size: 12px;
 }
 
+/* ── 沉浸模式(软全屏) ──
+   用 CSS 撑满,而不是进系统全屏。为什么见 rc.js 里的 setImmersive:进了
+   系统全屏之后,从屏幕顶部往下拖是系统级的"退出全屏"手势,网页拦不住
+   (WebKit bug 264215),而这个页面的核心操作就是按住拖鼠标 —— 一次向下
+   的拖拽就会把人踢出全屏,顺手打断那一次操作。不进就没有这个手势。
+
+   工具条**不藏起来**,改成浮在画面底部的半透明一条:键盘、右键这些按钮
+   就在上面,藏了就等于没有入口(右上角那个退出口只解决"怎么出去")。
+   原先那条 @media (display-mode: fullscreen) { #bar { display: none } }
+   已经删掉 —— 它同样会把按钮一起藏掉,而现在只有 immersive 一个开关管
+   这件事,不留两套规则打架。 */
+body.rc.immersive #bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+
+  /* 这条 HUD 浮在**画面**上,而画面是什么颜色不由我们决定 —— 主题跟随系统,
+     系统浅色时按钮是深字,压在黑色半透明上就是深字压深底,一句都读不清。
+     所以这里不跟主题走:底色固定成浅灰、接近不透明。
+
+     下面那几行把配色变量就地改回**浅色主题的取值**,子元素读的就是这几个
+     变量,于是不用给每个按钮单独写一遍覆盖(徽标、说明文字、输入框全都跟着
+     变对)。 */
+  background: rgba(243, 244, 246, .94);
+  border-top: 1px solid rgba(0, 0, 0, .12);
+
+  --bg:         #f6f7f9;
+  --surface:    #ffffff;
+  --border:     #e3e6ea;
+  --border-str: #d0d5db;
+  --text:       #16191d;
+  --text-dim:   #6b7280;
+  --code-bg:    #f2f4f7;
+  --ok:         #16a34a;
+  --warn:       #d97706;
+  --danger:     #dc2626;
+}
+
+/* 只给 inset,不写 height:fixed 元素的高度由上下两条边决定,跟着 iOS 的
+   布局视口走 —— 正好是我们要的。再写一个 height 就成了过约束(规范里
+   bottom 会被忽略),而 dvh 在地址栏露出时比布局视口矮,底下会留一条缝。 */
+body.rc.immersive #stage {
+  position: fixed;
+  inset: 0;
+}
+
+/* 沉浸模式右上角那两个浮标(收起/展开工具条、退出全屏)。
+   它们没地方"搭"工具条,只能直接压在画面上 —— 所以同样固定浅底深字,
+   不跟主题走(理由见上面 #bar 那段)。 */
+.rc-corner {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+}
+
+.rc-corner[hidden] { display: none; }
+
+.rc-corner button {
+  padding: 5px 10px;
+  font-size: 12px;
+  color: #16191d;
+  background: rgba(243, 244, 246, .9);
+  border-color: rgba(0, 0, 0, .16);
+}
+
+/* ── 软键盘(自己画的那个) ── */
+
+.rc-keys {
+  padding: 10px 12px 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  max-height: 46vh;
+  overflow: auto;
+}
+
+.rc-keys-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+/* 沉浸模式下 #stage 是 fixed,而定位元素画在静态元素之上 —— 软键盘要是
+   还在普通流里就会被画面盖住,所以这里也得浮起来,并且压在工具条上面
+   (它自带「关闭」按钮,不需要露出底下那条工具条)。 */
+body.rc.immersive #keyPad {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+}
+
+.rc-keys-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.rc-keys-row {
+  display: flex;
+  gap: 5px;
+}
+
+.rc-key {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 9px 2px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-str);
+  border-radius: 6px;
+  /* 连点同一个键不要选中文字、不要弹出放大镜 —— 键盘上这些默认行为全是干扰 */
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+.rc-key:active { border-color: var(--accent); }
+
+/* 按宽度权重:回车、退格、空格这类键要宽一点才像键盘 */
+.rc-key.w2 { flex-grow: 2; }
+.rc-key.w3 { flex-grow: 3; }
+.rc-key.w6 { flex-grow: 6; }
+
+/* 修饰键点亮:下一个键会带上它(按完即灭,见 rc.js) */
+.rc-key.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ── 系统软键盘的把手 ──
+   必须能被聚焦(iOS 只认真正的输入框),所以不能用 display:none 或
+   visibility:hidden —— 那两种情况下 focus() 不会弹键盘。用透明 + 1px 放在
+   角落,代价最小。
+   font-size 必须 ≥16px:iOS 聚焦时会为了"看得清"自动放大页面,字号小于
+   16px 就把整个画面顶飞了。 */
+.rc-typing {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  font-size: 16px;
+  pointer-events: none;
+}
+
 #err {
   margin: 0;
   border-radius: 0;
@@ -111,9 +284,17 @@ body.rc {
   overflow: auto;
 }
 
-/* 全屏时把工具条藏起来,画面占满。指针锁定之类的场景也用得上。 */
-@media (display-mode: fullscreen) {
-  #bar { display: none; }
+/* 这里原本有一条 @media (display-mode: fullscreen) { #bar { display: none } },
+   把工具条连同上面的按钮一起藏掉 —— 进了全屏就没有退出口,连键盘和右键也
+   没有了。现在"全屏"由 immersive 那一套统一管(见下方),不再有第二条规则
+   抢着控制 #bar 的显示。 */
+
+/* 工具条上的"开关型"按钮(右键、系统键盘):亮着 = 它现在是开着的。
+   右键那个尤其必须有这个反馈 —— 看不出亮灭的话,用户不会知道下一次点击
+   会被当成右键。 */
+#bar button.on {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 .badge {

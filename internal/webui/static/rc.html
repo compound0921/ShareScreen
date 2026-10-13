@@ -20,6 +20,14 @@
       <p class="hint" id="overlayHint"></p>
     </div>
   </div>
+
+  <!-- 沉浸模式下右上角那两个浮标:收起/展开下面的工具条、退出全屏。
+       下面的工具条是可以收起来的,收起来之后就只剩它们俩 —— 所以它们必须
+       一直浮在画面上,不能跟着工具条一起消失,否则既出不去也叫不回工具条。 -->
+  <div id="corner" class="rc-corner" hidden>
+    <button id="hudBtn" class="ghost">收起</button>
+    <button id="exitImmersive" class="ghost">退出全屏</button>
+  </div>
 </div>
 
 <div id="bar">
@@ -31,6 +39,9 @@
   <span id="ctlInfo" class="muted"></span>
   <span class="rc-spacer"></span>
   <button id="clipBtn" class="ghost" hidden>剪贴板</button>
+  <button id="kbSysBtn" class="ghost" hidden>系统键盘</button>
+  <button id="kbPadBtn" class="ghost" hidden>软键盘</button>
+  <button id="rclickBtn" class="ghost" hidden>右键</button>
   <button id="muteBtn" class="ghost" hidden>声音:关</button>
   <button id="fullBtn" class="ghost">全屏</button>
 </div>
@@ -58,6 +69,24 @@
 </div>
 
 <pre id="err" class="error-box" hidden></pre>
+
+<!-- 在页面上自己画的软键盘。偏功能键:系统软键盘给不了 Ctrl/Tab/Esc/方向键
+     这些,而远控里偏偏常用。键盘布局由 rc.js 生成(见 KEY_ROWS)。 -->
+<div id="keyPad" class="rc-keys" hidden>
+  <div class="rc-keys-head">
+    <strong>软键盘</strong>
+    <span class="muted">修饰键点亮点,下一个键才带它 —— Ctrl+C 就是先点 Ctrl 再点 c。</span>
+    <button id="keyPadClose" class="ghost">关闭</button>
+  </div>
+  <div id="keyPadGrid" class="rc-keys-grid"></div>
+</div>
+
+<!-- 系统软键盘的"把手"。iOS/Android 只在真正的输入框获得焦点时才弹键盘,
+     所以必须有这么一个东西给它聚焦 —— 它自己看不见,输入的内容由 rc.js
+     截下来送给主机,一个字都不留在本地。 -->
+<input id="typing" type="text" class="rc-typing" tabindex="-1"
+       autocomplete="off" autocorrect="off" autocapitalize="off"
+       spellcheck="false" enterkeyhint="send">
 
 <script src="/static/rc.js"></script>
 </body>

@@ -96,11 +96,21 @@ func (s *Server) handleCtl(sess *session, m clientMsg) {
 		s.notify()
 
 	case actRelease:
-		if s.control.release(sess.id) {
-			sess.write(serverMsg{Type: msgCtl, State: stateIdle, Reason: "已归还控制权"})
-			sess.drain()
-			s.notify()
+		// 同一个动作,两种处境:在控制就是"归还",还在排队就是"取消申请"。
+		// 观众那侧按钮上的字会跟着处境变,这里回的措辞也要跟着变 ——
+		// 排队的人看到"已归还控制权"会以为自己刚才在控制。
+		wasOwner, ok := s.control.release(sess.id)
+		if !ok {
+			return
 		}
+		reason := "已归还控制权"
+		if !wasOwner {
+			reason = "已取消申请"
+			log.Printf("远程控制:%s 撤回了控制申请", sess.label)
+		}
+		sess.write(serverMsg{Type: msgCtl, State: stateIdle, Reason: reason})
+		sess.drain()
+		s.notify()
 	}
 }
 
