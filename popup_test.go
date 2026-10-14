@@ -68,8 +68,9 @@ func (f *fakePopup) controller() *popupController {
 	}
 }
 
-// setPending 让"权威状态"变成有/没有一份申请。
-func (f *fakePopup) setPending(id, ip string) {
+// setPending 让"权威状态"变成有/没有一份申请。kind 用协议里的原字面量
+// ("control" / "open"),和 remotectl 那边发送的是同一份。
+func (f *fakePopup) setPending(id, ip, kind string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if id == "" {
@@ -78,6 +79,7 @@ func (f *fakePopup) setPending(id, ip string) {
 	}
 	f.status.Pending = &remotectl.Pending{
 		ID:       id,
+		Kind:     kind,
 		RemoteIP: ip,
 		At:       time.Now().Format(time.RFC3339),
 	}
@@ -128,7 +130,7 @@ func statusOf(f *fakePopup) remotectl.Status {
 func TestPopupOpensOnPending(t *testing.T) {
 	f := newFakePopup()
 	p := f.controller()
-	f.setPending("s1", "192.168.3.163")
+	f.setPending("s1", "192.168.3.163", "control")
 
 	p.onChange(statusOf(f))
 
@@ -141,6 +143,36 @@ func TestPopupOpensOnPending(t *testing.T) {
 	}
 }
 
+// 申请的种类要传到弹窗那一层 —— 措辞全看它。
+//
+// 这一条不能只靠"反正都是同一个弹窗":两种申请的正文差一句"同意后会开始
+// 共享画面",而那句话是主机对"我的屏幕要被共享出去"的唯一知情来源。
+func TestPopupCarriesKind(t *testing.T) {
+	f := newFakePopup()
+	p := f.controller()
+	f.setPending("s1", "192.168.3.163", "open")
+
+	p.onChange(statusOf(f))
+
+	waitFor(t, "弹窗被调用", func() bool { return f.callCount() == 1 })
+	if got := f.call(0).req.Kind; got != notify.KindOpen {
+		t.Errorf("弹窗拿到的种类 = %v,想要 KindOpen", got)
+	}
+
+	// 没见过的种类一律当控制申请 —— 那是改动之前唯一的种类,措辞也更保守
+	// (只提"控制",不提"把你的屏幕共享出去")。
+	f2 := newFakePopup()
+	p2 := f2.controller()
+	f2.setPending("s2", "192.168.3.9", "某种还没定义的东西")
+
+	p2.onChange(statusOf(f2))
+
+	waitFor(t, "弹窗被调用", func() bool { return f2.callCount() == 1 })
+	if got := f2.call(0).req.Kind; got != notify.KindControl {
+		t.Errorf("不认识的种类应当退回 KindControl,得到 %v", got)
+	}
+}
+
 // 同一份申请重复回调**只弹一次**。
 //
 // 这条是整套"盯跃迁、不是盯回调"设计存在的全部理由:OnChange 在每一次
@@ -149,7 +181,7 @@ func TestPopupOpensOnPending(t *testing.T) {
 func TestPopupDoesNotReopenForSamePending(t *testing.T) {
 	f := newFakePopup()
 	p := f.controller()
-	f.setPending("s1", "192.168.3.163")
+	f.setPending("s1", "192.168.3.163", "control")
 
 	for i := 0; i < 5; i++ {
 		p.onChange(statusOf(f))
@@ -167,11 +199,11 @@ func TestPopupDoesNotReopenForSamePending(t *testing.T) {
 func TestPopupClosesWhenPendingCleared(t *testing.T) {
 	f := newFakePopup()
 	p := f.controller()
-	f.setPending("s1", "192.168.3.163")
+	f.setPending("s1", "192.168.3.163", "control")
 	p.onChange(statusOf(f))
 	waitFor(t, "弹窗被调用", func() bool { return f.callCount() == 1 })
 
-	f.setPending("", "")
+	f.setPending("", "", "")
 	p.onChange(statusOf(f))
 
 	waitFor(t, "弹窗的 ctx 被取消", func() bool {
@@ -183,7 +215,7 @@ func TestPopupClosesWhenPendingCleared(t *testing.T) {
 func TestPopupAllowCallsApprove(t *testing.T) {
 	f := newFakePopup()
 	p := f.controller()
-	f.setPending("s1", "192.168.3.163")
+	f.setPending("s1", "192.168.3.163", "control")
 	p.onChange(statusOf(f))
 	waitFor(t, "弹窗被调用", func() bool { return f.callCount() == 1 })
 
@@ -205,7 +237,7 @@ func TestPopupAllowCallsApprove(t *testing.T) {
 func TestPopupDenyCallsDeny(t *testing.T) {
 	f := newFakePopup()
 	p := f.controller()
-	f.setPending("s1", "192.168.3.163")
+	f.setPending("s1", "192.168.3.163", "control")
 	p.onChange(statusOf(f))
 	waitFor(t, "弹窗被调用", func() bool { return f.callCount() == 1 })
 
@@ -228,7 +260,7 @@ func TestPopupDenyCallsDeny(t *testing.T) {
 func TestPopupTimeoutSendsNoDecision(t *testing.T) {
 	f := newFakePopup()
 	p := f.controller()
-	f.setPending("s1", "192.168.3.163")
+	f.setPending("s1", "192.168.3.163", "control")
 	p.onChange(statusOf(f))
 	waitFor(t, "弹窗被调用", func() bool { return f.callCount() == 1 })
 
@@ -252,7 +284,7 @@ func TestPopupIgnoresStaleStatus(t *testing.T) {
 	p := f.controller()
 
 	// 权威状态说:有一份申请。
-	f.setPending("s1", "192.168.3.163")
+	f.setPending("s1", "192.168.3.163", "control")
 	// 但回调带来的是一份"没有申请"的旧快照。
 	p.onChange(remotectl.Status{})
 
@@ -276,11 +308,11 @@ func TestPopupIgnoresStaleStatus(t *testing.T) {
 func TestPopupReplacesOnNewPending(t *testing.T) {
 	f := newFakePopup()
 	p := f.controller()
-	f.setPending("s1", "192.168.3.163")
+	f.setPending("s1", "192.168.3.163", "control")
 	p.onChange(statusOf(f))
 	waitFor(t, "弹窗被调用", func() bool { return f.callCount() == 1 })
 
-	f.setPending("s2", "192.168.3.9")
+	f.setPending("s2", "192.168.3.9", "control")
 	p.onChange(statusOf(f))
 
 	waitFor(t, "第二个弹窗", func() bool { return f.callCount() == 2 })

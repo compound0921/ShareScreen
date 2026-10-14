@@ -156,3 +156,46 @@ func TestNormalizeKeepsClearedPassword(t *testing.T) {
 		t.Errorf("清空之后 Normalize 不该填回来,得到 %q", got)
 	}
 }
+
+// 请求入口默认开 —— 这和项目里别的对外开关是反的。
+//
+// 别的对外能力(远控、AutoPortMap)默认关,理由是"对外动作不该在用户没
+// 要求的时候做"。这一条是唯一的例外:默认开,换来"把链接发出去,对方
+// 点一下就能请求"。
+//
+// 这个测试把这个取舍钉住:谁顺手把它改成默认关,会在这里读到为什么不能,
+// 而不是只看到一行测试变红。
+func TestDefaultHasRequestEntry(t *testing.T) {
+	if !Default().RemoteControl.RequestEntry {
+		t.Error("请求入口应当默认打开:关掉它,远控没开时对方就够不着主机," +
+			"整条「请求开启」链路等于不存在")
+	}
+}
+
+// MappedPort 跟着"端口会不会在监听"走,不跟着"远控开没开"走。
+//
+// 第二条用例是这里的关键:只有请求入口开着的时候也必须映射 —— 请求入口
+// 存在的唯一意义就是远端够得到它,不映射就只有局域网内能用,名不副实。
+func TestMappedPortFollowsListening(t *testing.T) {
+	cases := []struct {
+		name    string
+		enabled bool
+		entry   bool
+		want    int
+	}{
+		{"两个都不开:一条映射都不留", false, false, 0},
+		{"只有请求入口:要映射", false, true, 8090},
+		{"只有远控:要映射", true, false, 8090},
+		{"两个都开:要映射", true, true, 8090},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := RemoteControlConfig{Port: 8090, Enabled: c.enabled, RequestEntry: c.entry}
+			if got := r.MappedPort(); got != c.want {
+				t.Errorf("Enabled=%v RequestEntry=%v → %d,想要 %d",
+					c.enabled, c.entry, got, c.want)
+			}
+		})
+	}
+}

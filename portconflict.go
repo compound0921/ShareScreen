@@ -94,6 +94,24 @@ func findPortConflict(cfg config.Config) *portConflict {
 		},
 	}
 
+	// 远控端口。以前它不在这里,因为远控默认关着、不开就不占端口;现在
+	// "请求入口"默认开着,所以它和上面几个一样是**启动时就会绑**的端口。
+	//
+	// 不加这一条的后果不是"检测不到",而是检测得太晚:端口被占时会变成
+	// 一条运行期的日志,而用户已经看到程序"起来了"、链接发出去了,却始终
+	// 没有人能连上。这里走同一条"清残留进程 / 换端口"的路,才是对的时机。
+	//
+	// 探测地址用 any():它绑 0.0.0.0,只探回环会漏掉"占着全网卡"的那种占用。
+	// router 为真:这个端口在自动映射开着时要进路由器规则,不能悄悄换掉。
+	if cfg.RemoteControl.MappedPort() != 0 {
+		probes = append(probes, portConflict{
+			label: "远控/请求入口",
+			addr:  any(cfg.RemoteControl.Port), port: cfg.RemoteControl.Port,
+			router: true,
+			set:    func(c *config.Config, p int) { c.RemoteControl.Port = p },
+		})
+	}
+
 	for i := range probes {
 		p := &probes[i]
 

@@ -8,15 +8,23 @@
 //	观众浏览器 ──WHEP 拉流──► MediaMTX(原有链路,不动)
 //	            ──WebSocket──► 本包(输入 + 控制权信令)──► 注入本机
 //
-// # 默认关闭
+// # 两个开关:授权和监听
 //
-// 不开的时候这个服务不监听任何端口。这和"打开就绑 0.0.0.0"是两回事:
-// 不开端口是零攻击面,而绑全网卡即使有鉴权也仍然多一个被扫描的目标。
+// 远控本身默认关闭,但另有一个默认打开的「请求入口」:它在远控没开的
+// 时候也占着端口监听,专门受理"请求开启共享与远控"。两件事分开是因为
+// 这个功能的立足点就是"远控还没开的时候,对方也得够得着主机"——一个
+// 开关同时管两件事就做不到。
+//
+// 监听意味着绑 0.0.0.0,这本身就是有代价的:即使有鉴权,它也仍然是网络上
+// 多一个被扫描的目标 —— 而"不监听"是没有这个代价的。这个默认值就是拿它
+// 换"发一条链接对方就能请求",取舍写在 config.RemoteControlConfig 的注释里。
 //
 // # 两层门槛
 //
 //  1. 链接里带 256 位随机令牌 —— 决定能不能连上来。
-//  2. 主机的当场批准 —— 决定能不能真的操作。
+//  2. 主机的当场批准 —— 决定能不能真的操作(或者开启)。
+//
+// 还有控制密码这条捷径,它两层都免掉第二层。见 config 里那段。
 //
 // 之所以要两层:视频流本身是不鉴权的(链接即凭据,见架构文档 §7.5 的
 // 取舍),所以"能看"这件事挡不住。让陌生人只能看、不能动,靠的是第二层。
@@ -75,9 +83,17 @@ const (
 	shutdownTimeout = 2 * time.Second
 )
 
-// Pending 是一份等待主机批准的控制申请。
+// Pending 是一份等待主机批准的申请。
 type Pending struct {
 	ID string `json:"id"`
+
+	// Kind 区分两种申请:"control" 是申请操作控制权,"open" 是请求开启
+	// 共享与远控。
+	//
+	// 两种申请共用同一个排队名额(见 control),所以主机的弹窗、控制页上
+	// 那一块、托盘提示都只需要认这一个结构 —— 多出来的只有"点允许之后
+	// 该做什么",那件事在 Server.Approve 里按它分派。
+	Kind string `json:"kind"`
 
 	// RemoteIP 是申请方的地址,给主机判断"这是不是我认识的人"。
 	RemoteIP string `json:"remoteIp"`
@@ -85,11 +101,31 @@ type Pending struct {
 	At string `json:"at"`
 }
 
+// 申请的种类。
+const (
+	// pendingControl 申请操作控制权。
+	pendingControl = "control"
+	// pendingOpen 请求开启共享与远控。
+	pendingOpen = "open"
+)
+
 // Status 是给控制页和托盘看的远控状态快照。
 type Status struct {
+	// Enabled 是**授权**:能不能操作这台电脑。语义没有变过,托盘和控制页
+	// 读的都是它。
 	Enabled bool `json:"enabled"`
 
-	// Listening 为假而 Enabled 为真,说明端口没绑上(被占用之类)。
+	// RequestEntry 是请求入口开着没有。它和 Enabled 是两个独立的开关,
+	// 但共用同一个端口,见包注释。
+	RequestEntry bool `json:"requestEntry"`
+
+	// Sharing 报告主机此刻在不在推流。由 Options.Sharing 提供 —— 共享
+	// 的开关在别处(控制页、托盘),这里只是把它反映给远控页,好让观众
+	// 知道自己该看到"请求开启"还是"申请控制"。
+	Sharing bool `json:"sharing"`
+
+	// Listening 为假而 Enabled(或 RequestEntry)为真,说明端口没绑上
+	// (被占用之类)。
 	Listening bool `json:"listening"`
 	Port      int  `json:"port"`
 
@@ -161,6 +197,23 @@ type Options struct {
 	// 控制页上的剪贴板开关不会出现。
 	Clipboard *clipboard.Sync
 
+	// Sharing 报告主机此刻在不在推流。nil 视为不在。
+	//
+	// 做成函数而不是一个值:它每次问都要拿到当下的事实,而共享的开关
+	// 随时会被控制页或托盘改掉。
+	Sharing func() bool
+
+	// OnApproveOpen 落地一次"开启"请求:开始共享 + 开启远控,返回实际的
+	// 结果。
+	//
+	// 这两个动作都在 server 层(推流管理器、远控配置),本包够不着,所以
+	// 反过来注入。nil 表示这一版不支持 —— 那样批准会失败,而不是静悄悄
+	// 什么都不做。
+	//
+	// **会阻塞**(里面要绑端口、写配置),调用方必须放到独立协程里跑,
+	// 不能压在观众连接那条读协程上。
+	OnApproveOpen func() OpenResult
+
 	// OnChange 在状态发生变化时调用(有人连上来、有人申请、控制权易主)。
 	// 用来刷新托盘提示 —— 控制页那边靠 2 秒轮询,不需要这个。
 	OnChange func(Status)
@@ -178,8 +231,11 @@ type Server struct {
 	clipboard *clipboard.Sync
 	clip      *clipboard.Sync
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// enabled 和 reqOn 是两个独立开关,但只共用一个 listener ——
+	// 端口在监听的充要条件是两者之一为真,见包注释。
 	enabled  bool
+	reqOn    bool
 	token    string
 	password string
 	port     int
@@ -189,6 +245,19 @@ type Server struct {
 	seq      int
 	lastErr  string
 	closed   bool
+
+	// loopsOnce 保证两条常驻协程只起一次。
+	//
+	// 不能挂在"开启"上:端口现在可以被请求入口单独打开、关掉、再打开,
+	// 那样每来一轮就多两条协程,而旧的那些还在 tick。
+	loopsOnce sync.Once
+
+	// openMu 串行化"开启"的落地动作。
+	//
+	// 两条路会走到它:主机点允许(弹窗那条协程),以及填对密码的请求
+	// (观众连接的读协程再起一条协程去执行)。两个人几乎同时发起就会
+	// 并发地开同一个东西,而绑端口、启动推流都不是可重入的。
+	openMu sync.Mutex
 }
 
 func New(o Options) *Server {
@@ -204,7 +273,10 @@ func New(o Options) *Server {
 	}
 }
 
-// SetEnabled 开/关远控服务。开启会真的开始监听端口。
+// SetEnabled 开/关远控授权。开启会确保端口在监听。
+//
+// 关掉它**不一定会关掉端口**:请求入口还开着的时候端口要继续留着,否则
+// 对方就再也没法请求把它开回来了(见包注释)。要停掉对外监听请关请求入口。
 func (s *Server) SetEnabled(on bool) error {
 	s.mu.Lock()
 	if s.closed {
@@ -226,8 +298,7 @@ func (s *Server) SetEnabled(on bool) error {
 	if !on {
 		s.enabled = false
 		s.lastErr = ""
-		ln, srv := s.listener, s.httpSrv
-		s.listener, s.httpSrv = nil, nil
+		ln, srv := s.takeListenerLocked()
 		s.mu.Unlock()
 
 		s.control.clear()
@@ -237,22 +308,126 @@ func (s *Server) SetEnabled(on bool) error {
 		return nil
 	}
 
-	// 开启前先确认这个采集源支持远控 —— 不支持就根本不该监听端口。
+	// 开启前先确认这个采集源支持远控 —— 不支持就根本不该授权。
 	if _, ok := s.captureRect(); !ok {
 		s.lastErr = "当前采集源不支持远程控制(只有整屏采集能用)"
 		err := errors.New(s.lastErr)
 		s.mu.Unlock()
 		return err
 	}
+	s.mu.Unlock()
 
+	// 端口通常已经为请求入口绑着了,这一句就是空操作 —— 那种情况下
+	// **绝不能**再 Listen 一次,同一个端口绑两次必然失败。
+	if err := s.ensureListening(); err != nil {
+		return s.failEnable(err)
+	}
+
+	s.mu.Lock()
+	if s.closed || s.enabled {
+		// 期间状态变了,放弃这次开启
+		s.mu.Unlock()
+		return nil
+	}
+	s.enabled = true
+	s.lastErr = ""
 	port := s.port
 	s.mu.Unlock()
 
-	// 绑定放在锁外面:它可能耗时(防火墙拦截、端口被占),不该卡住
-	// 正在轮询 /api/status 的控制页。
+	log.Printf("远程控制已开启,端口 0.0.0.0:%d", port)
+	s.notify()
+	return nil
+}
+
+// SetRequestEntry 开/关常驻的"请求入口"。
+//
+// 开着的时候远控端口一直监听,哪怕远控本身没开 —— 远端的链接永远敲得到
+// 门。这是整个"请求开启"链路的立足点,默认值是开(代价写在 config 那边)。
+//
+// 和 SetEnabled 一样,**失败不回退这个开关**,只记 lastErr。理由是同一个:
+// 配置已经写下去了,而"配置说开着、实际没监听"是 Status.Listening 能如实
+// 表达出来的状态,下次开启还会重试。
+func (s *Server) SetRequestEntry(on bool) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return errors.New("远控服务已关闭")
+	}
+	if on == s.reqOn {
+		last := s.lastErr
+		s.mu.Unlock()
+		if !on || last == "" {
+			return nil
+		}
+		return errors.New(last)
+	}
+
+	if !on {
+		s.reqOn = false
+		ln, srv := s.takeListenerLocked()
+		s.mu.Unlock()
+
+		s.dropAll()
+		s.stopListening(ln, srv)
+		s.notify()
+		return nil
+	}
+
+	s.reqOn = true
+	port := s.port
+	s.mu.Unlock()
+
+	if err := s.ensureListening(); err != nil {
+		return s.failEnable(err)
+	}
+
+	log.Printf("请求入口已开启,远控端口 0.0.0.0:%d 保持监听", port)
+	s.notify()
+	return nil
+}
+
+// wantListenLocked 报告端口此刻**应该**在监听。调用方须持有 s.mu。
+func (s *Server) wantListenLocked() bool {
+	return s.enabled || s.reqOn
+}
+
+// takeListenerLocked 在确实该停止监听时把监听器摘下来交给调用方去关;
+// 还需要监听时返回零值,调用方拿到 nil 就什么都不用做。
+//
+// 调用方须持有 s.mu,而且**必须在解锁之后再调 stopListening** —— 那里
+// 会等最多 2 秒的在途请求,攥着锁等等于把控制页的轮询一起堵住。
+func (s *Server) takeListenerLocked() (net.Listener, *http.Server) {
+	if s.wantListenLocked() {
+		return nil, nil
+	}
+	ln, srv := s.listener, s.httpSrv
+	s.listener, s.httpSrv = nil, nil
+	return ln, srv
+}
+
+// ensureListening 确保端口在监听;已经绑着就是空操作。
+//
+// 幂等是必需的,不是优化:请求入口把端口绑上之后,再点"开启远控"走到的
+// 就是这里,而同一个端口绑第二次必然报"地址已被占用"。
+//
+// 绑定放在锁外面:它可能耗时(防火墙拦截、端口被占),不该卡住正在轮询
+// /api/status 的控制页。
+func (s *Server) ensureListening() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return errors.New("远控服务已关闭")
+	}
+	if s.listener != nil || !s.wantListenLocked() {
+		s.mu.Unlock()
+		return nil
+	}
+	port := s.port
+	s.mu.Unlock()
+
 	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
-		return s.failEnable(err)
+		return err
 	}
 
 	srv := &http.Server{
@@ -261,16 +436,15 @@ func (s *Server) SetEnabled(on bool) error {
 	}
 
 	s.mu.Lock()
-	if s.closed || s.enabled {
-		// 期间状态变了,放弃这次开启
+	if s.closed || s.listener != nil || !s.wantListenLocked() {
+		// 期间状态变了(关掉了,或者别人已经绑上了),放弃这一次
 		s.mu.Unlock()
 		_ = ln.Close()
 		return nil
 	}
-	s.enabled = true
-	s.lastErr = ""
 	s.listener = ln
 	s.httpSrv = srv
+	s.lastErr = ""
 	s.mu.Unlock()
 
 	go func() {
@@ -278,12 +452,31 @@ func (s *Server) SetEnabled(on bool) error {
 			log.Printf("远控服务停止: %v", err)
 		}
 	}()
-	go s.expireLoop()
-	go s.clipboardLoop()
+	s.startLoops()
 
-	log.Printf("远程控制已开启,监听 0.0.0.0:%d", port)
-	s.notify()
 	return nil
+}
+
+// startLoops 保证过期检查和剪贴板轮询这两条协程活着。
+//
+// 在第一次真正绑上监听时起,之后一直活着:端口可以被请求入口单独开、关、
+// 再开,而循环体里靠 continue 跳过"这一轮不该干活"的 tick(见各自注释),
+// 所以不需要跟着端口反复起停。
+func (s *Server) startLoops() {
+	s.loopsOnce.Do(func() {
+		go s.expireLoop()
+		go s.clipboardLoop()
+	})
+}
+
+// loopState 一次拿够两条循环要判断的状态。
+//
+// 合成一个方法是为了每 tick 只拿一次锁 —— 分开判断的话,几次判断之间
+// 状态还会变,算出来的是一个自相矛盾的时刻。
+func (s *Server) loopState() (listening, enabled, closed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listener != nil, s.enabled, s.closed
 }
 
 // failEnable 记录并返回"开启失败"的原因。
@@ -292,7 +485,9 @@ func (s *Server) failEnable(err error) error {
 	// 端口被占用是最常见的失败,单独说清楚 —— 通用的 "address already
 	// in use" 对用户没有任何指导意义。
 	if isAddrInUse(err) {
-		s.lastErr = fmt.Sprintf("端口 %d 已被占用,无法开启远程控制", s.port)
+		// 措辞不写"开启远程控制":同一个端口现在也可能是被请求入口
+		// 占着绑不上,那句话会让用户去找一个不存在的"远控开关问题"。
+		s.lastErr = fmt.Sprintf("端口 %d 已被占用,远控端口无法监听", s.port)
 	} else {
 		s.lastErr = err.Error()
 	}
@@ -367,6 +562,27 @@ func (s *Server) currentToken() string {
 	return s.token
 }
 
+// isEnabled 报告远控授权此刻开着没有。
+//
+// 注意它和"端口在不在监听"是两件事(见包注释):请求入口开着而远控没开的
+// 时候,监听为真、这个为假。要判断"能不能注入输入",认的是这个。
+func (s *Server) isEnabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enabled
+}
+
+// sharing 报告主机此刻在不在推流。
+//
+// 必须在**不持 s.mu** 的时候调:回调是外部传进来的,它可能去碰别的锁
+// (推流管理器那边),两边谁的顺序不一致就是死锁。
+func (s *Server) sharing() bool {
+	if s.opts.Sharing == nil {
+		return false
+	}
+	return s.opts.Sharing()
+}
+
 // currentPassword 返回当前的控制密码;没设则返回空串。
 //
 // 空串在调用方是一个有意义的信号("没设密码,走原来的批准流程"),
@@ -388,16 +604,19 @@ func (s *Server) captureRect() (screen.Rect, bool) {
 func (s *Server) Status() Status {
 	s.mu.Lock()
 	st := Status{
-		Enabled:   s.enabled,
-		Listening: s.listener != nil,
-		Port:      s.port,
-		Token:     s.token,
-		Sessions:  len(s.sessions),
-		Clipboard: s.clip != nil,
-		Password:  s.password,
-		LastError: s.lastErr,
+		Enabled:      s.enabled,
+		RequestEntry: s.reqOn,
+		Listening:    s.listener != nil,
+		Port:         s.port,
+		Token:        s.token,
+		Sessions:     len(s.sessions),
+		Clipboard:    s.clip != nil,
+		Password:     s.password,
+		LastError:    s.lastErr,
 	}
 	s.mu.Unlock()
+
+	st.Sharing = s.sharing()
 
 	st.Controller, st.Pending = s.control.snapshot()
 	if st.Enabled {
@@ -406,12 +625,31 @@ func (s *Server) Status() Status {
 	return st
 }
 
-// Approve 批准一份控制申请。
+// Approve 批准一份待批的申请。
+//
+// 两种申请走同一个入口(它们共用一份待批名额),由 kind 决定"批准"到底
+// 意味着什么:控制申请就是把控制权交给他;开启请求还要先把共享和远控真正
+// 打开 —— 那件事在 server 层,通过 Options.OnApproveOpen 回调进来。
+//
+// 主机点的那一下对两者都是**知情同意**:弹窗上的文案必须把"同意之后会
+// 发生什么"说清楚(见 notify.Describe),因为这里不再有第二次确认。
 func (s *Server) Approve(id string) bool {
-	if !s.control.approve(id) {
+	kind, ok := s.control.approve(id)
+	if !ok {
 		return false
 	}
-	if sess := s.session(id); sess != nil {
+	sess := s.session(id)
+
+	if kind == pendingOpen {
+		if sess != nil {
+			log.Printf("远程控制:已批准 %s 的开启请求", sess.label)
+			s.openFor(sess)
+		}
+		s.notify()
+		return true
+	}
+
+	if sess != nil {
 		s.grant(sess)
 		log.Printf("远程控制:已批准 %s", sess.label)
 	}
@@ -440,13 +678,19 @@ func (s *Server) grant(sess *session) {
 	}
 }
 
-// Deny 拒绝一份控制申请。
+// Deny 拒绝一份待批的申请。措辞按申请种类分 —— "拒绝了这次申请"和
+// "拒绝了这次请求"在页面上落在两个不同的状态机上。
 func (s *Server) Deny(id string) bool {
-	if !s.control.deny(id) {
+	kind, ok := s.control.deny(id)
+	if !ok {
 		return false
 	}
 	if sess := s.session(id); sess != nil {
-		sess.write(serverMsg{Type: msgCtl, State: stateDenied, Reason: "主机拒绝了这次申请"})
+		if kind == pendingOpen {
+			sess.write(serverMsg{Type: msgOpen, State: openDenied, Reason: "主机拒绝了这次请求"})
+		} else {
+			sess.write(serverMsg{Type: msgCtl, State: stateDenied, Reason: "主机拒绝了这次申请"})
+		}
 	}
 	s.notify()
 	return true
@@ -505,12 +749,15 @@ func (s *Server) session(id string) *session {
 	return s.sessions[id]
 }
 
-// addSession 登记一个新连接。服务没在开启状态时拒绝。
+// addSession 登记一个新连接。端口没在监听时拒绝。
+//
+// 判据是"有没有监听",不是"远控开没开":请求入口开着而远控没开的时候,
+// 对方要能连上来说一句"请把共享和远控开一下"—— 那是这个功能的入口。
 func (s *Server) addSession(sess *session) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.enabled || s.closed {
+	if s.listener == nil || s.closed {
 		return false
 	}
 	s.sessions[sess.id] = sess
@@ -561,19 +808,38 @@ func (s *Server) expireLoop() {
 	defer t.Stop()
 
 	for range t.C {
-		s.mu.Lock()
-		live := s.enabled
-		s.mu.Unlock()
-		if !live {
+		listening, _, closed := s.loopState()
+		if closed {
 			return
 		}
-		if id, ok := s.control.expire(time.Now()); ok {
-			if sess := s.session(id); sess != nil {
-				sess.write(serverMsg{Type: msgCtl, State: stateDenied, Reason: "主机没有应答"})
-			}
+		// 这里必须是 continue 不能 return:请求入口让端口可以早于远控开启,
+		// 而"远控关着"现在是常态而非终点。一旦 return,这条协程就没了 ——
+		// 表现为远控关过一次之后,新来的开启请求永远不过期,一直挂在
+		// 主机的弹窗和控制页上。
+		if !listening {
+			continue
+		}
+		if id, kind, ok := s.control.expire(time.Now()); ok {
+			s.expireSession(id, kind)
 			s.notify()
 		}
 	}
+}
+
+// expireSession 告诉等太久的那个观众:没人应答。
+//
+// 文案按申请的种类分:控制申请作废是"主机没有应答",开启请求超时则要
+// 说明"可以再试一次"—— 后者没被拒绝,只是主机不在。
+func (s *Server) expireSession(id, kind string) {
+	sess := s.session(id)
+	if sess == nil {
+		return
+	}
+	if kind == pendingOpen {
+		sess.write(serverMsg{Type: msgOpen, State: openDenied, Reason: "主机没有应答,可以再试一次"})
+		return
+	}
+	sess.write(serverMsg{Type: msgCtl, State: stateDenied, Reason: "主机没有应答"})
 }
 
 // clipboardLoop 轮询本机剪贴板,变了就推给正在控制的那个人。
@@ -585,11 +851,14 @@ func (s *Server) clipboardLoop() {
 	defer t.Stop()
 
 	for range t.C {
-		s.mu.Lock()
-		live := s.enabled && !s.closed
-		s.mu.Unlock()
-		if !live {
+		// 同上:远控关着时这一轮跳过,但协程要活着 —— 关掉再开回来是很
+		// 正常的用法,协程跟着端口起停只会多出一堆生命周期要管。
+		_, enabled, closed := s.loopState()
+		if closed {
 			return
+		}
+		if !enabled {
+			continue
 		}
 
 		clip := s.clipSync()
@@ -684,6 +953,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"path":     path,
 		"lan":      lan,
 		"rotate":   deg,
+		// 这两个和 hello 里的是同一份信息,给的是**首屏**:页面在
+		// WebSocket 连上之前就要决定画"请求开启"还是画播放器,而那时候
+		// 还没有 hello。两处必须一致,都是现读的。
+		"remote":  s.isEnabled(),
+		"sharing": s.sharing(),
 	})
 }
 
@@ -710,7 +984,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	label := remoteLabel(r)
 	sess := newSession(s.newSessionID(), label, conn, s)
 	if !s.addSession(sess) {
-		_ = conn.Close(websocket.StatusGoingAway, "远程控制未开启")
+		_ = conn.Close(websocket.StatusGoingAway, "远控端口未监听")
 		return
 	}
 	defer s.removeSession(sess)
@@ -719,11 +993,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go sess.injectLoop()
 	go s.pingLoop(sess)
 
+	// hello 里带上远控和共享的**当下**状态:页面靠它决定自己该显示
+	// "请求开启"还是"申请控制"。不能让它用自己缓存的上一次状态 ——
+	// 观众可能在主机点完允许之后才刷新页面。
 	sess.write(serverMsg{
 		Type:        "hello",
 		You:         sess.id,
 		Clipboard:   s.clipSync() != nil,
 		PasswordSet: s.currentPassword() != "",
+		Remote:      s.isEnabled(),
+		Sharing:     s.sharing(),
 	})
 
 	log.Printf("远程控制:观众 %s 已连接(%s)", sess.id, label)

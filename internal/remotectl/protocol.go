@@ -34,10 +34,19 @@ type clientMsg struct {
 const (
 	// msgCtl 是控制权协商:请求接管、主动归还。
 	msgCtl = "ctl"
+	// msgOpen 是"请求开启共享与远控":请求、撤回。
+	//
+	// 和 msgCtl 分开而不是给 ctl 加一个动作,是因为它回答的是另一个问题:
+	// ctl 问"能不能让我操作",前提是远控已经开着;open 问"能不能把它开起来",
+	// 而它正是远控没开的时候唯一的出路。两者的状态机也只有一处相同(都占
+	// 主机那一份待批名额)。
+	msgOpen = "open"
 	// msgIn 是一次输入事件。
 	msgIn = "in"
 	// msgClip 把一段文本写进主机剪贴板。
 	msgClip = "clip"
+	// msgHold 是主机自己在用键鼠、注入暂时让路。只由主机→观众单向发。
+	msgHold = "hold"
 )
 
 // 输入事件类型(t="in" 时的 k)。
@@ -67,6 +76,14 @@ type serverMsg struct {
 	// t="hello" 时告诉观众它的会话 ID,以及本机是否开启了剪贴板同步。
 	You       string `json:"you,omitempty"`
 	Clipboard bool   `json:"clipboard,omitempty"`
+
+	// Remote 和 Sharing 是连上那一刻的远控/共享状态,t="hello" 时下发。
+	//
+	// 页面靠这两个值决定自己该是"请求开启"那一套还是"申请控制"那一套。
+	// 不能用页面自己缓存的上一次状态:观众可能是在主机点完允许之后才
+	// 刷新页面的,那样他会看到一个已经过时的"请求开启"按钮。
+	Remote  bool `json:"remote,omitempty"`
+	Sharing bool `json:"sharing,omitempty"`
 
 	// PasswordSet 表示主机设了控制密码,t="hello" 时下发。
 	//
@@ -100,6 +117,35 @@ const (
 	stateBusy = "busy"
 	// stateIdle 表示当前没人控制,可以申请。
 	stateIdle = "idle"
+)
+
+// "请求开启"的状态(t="open" 时的 State)。
+//
+// 刻意和上面那一组分开命名:两边都有 pending/denied,但含义不同(一边是
+// 等着拿控制权,一边是等着把功能打开),共用常量会让 rc.js 里那两个分支
+// 看起来可以互相替代,而它们不能。
+const (
+	// openPending 表示请求已送到,等主机点"允许"。
+	openPending = "pending"
+	// openOpened 表示共享和远控都已经打开,接下来就能看能控了。
+	openOpened = "opened"
+	// openDenied 表示主机拒绝了,或者等太久过期了。
+	openDenied = "denied"
+	// openFailed 表示主机点了允许,但落地的时候失败了(端口被占、采集源
+	// 不支持之类)。和 denied 分开:这不是"不同意",是"同意但没做成",
+	// 页面上的措辞和可重试性都不一样。
+	openFailed = "failed"
+)
+
+// 让路状态(t="hold" 时的 State)。
+//
+// 用字符串而不是布尔,是因为 serverMsg 的字段全带 omitempty —— 一个
+// false 会被整个省掉,"关掉了"和"没提过这件事"在 JSON 里就分不出来了。
+const (
+	// holdOn 表示主机正在操作,注入已让开。
+	holdOn = "on"
+	// holdOff 表示让路结束,注入恢复。
+	holdOff = "off"
 )
 
 // 错误码(serverMsg.Code)。

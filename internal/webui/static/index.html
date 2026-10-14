@@ -184,6 +184,20 @@
         观众点了也对不上位置。
       </p>
 
+      <!-- 请求入口。它**不跟着"允许远程控制"走**,所以是单独一个开关:
+           它的全部意义就是"远控还没开的时候,对方也能连上来请你开一下"。 -->
+      <label class="check gap-top">
+        <input type="checkbox" id="rcRequestEntry">
+        <span>接受「请求开启共享与远控」</span>
+      </label>
+      <p class="hint">
+        开着的时候,即使没勾上面那项,这个端口也会<strong>一直对外监听</strong> ——
+        别人拿着链接打开发出请求,你点同意,共享和远控就一起开起来。<br>
+        这是本程序唯一一个默认就绑 <code>0.0.0.0</code> 的功能。两道门槛是
+        链接里的令牌和你的当场批准,而<strong>控制密码(默认 123456)也能让对方
+        跳过批准直接开启</strong> —— 要收紧就改掉或清空那个密码。
+      </p>
+
       <label class="check gap-top">
         <input type="checkbox" id="rcClipboard">
         <span>同步剪贴板(文本)</span>
@@ -210,7 +224,7 @@
       </div>
 
       <div class="rc-pending" id="rcPending" hidden>
-        <p class="rc-title">有人申请控制这台电脑</p>
+        <p class="rc-title" id="rcPendingTitle">有人申请控制这台电脑</p>
         <p class="hint" id="rcPendingFrom"></p>
         <div class="actions">
           <button type="button" id="rcApprove" class="primary">允许</button>

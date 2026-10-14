@@ -14,6 +14,8 @@ func (s *Server) dispatch(sess *session, m clientMsg) {
 	switch m.Type {
 	case msgCtl:
 		s.handleCtl(sess, m)
+	case msgOpen:
+		s.handleOpen(sess, m)
 	case msgIn:
 		s.handleInput(sess, m)
 	case msgClip:
@@ -40,10 +42,40 @@ func (s *Server) dispatch(sess *session, m clientMsg) {
 // 猜错走的是普通的"申请 → 待批准",主机看到那个弹窗就能拒绝、就能收回控制权。
 const maxPwFails = 8
 
+// passwordFail 记一次密码错误;到了上限就断开这条连接。
+//
+// 返回 true 表示已经断开,调用方必须立刻停下 —— 继续往下写消息是往一条
+// 正在关闭的连接上写。
+//
+// 抽出来是因为**两条路都会数这个数**:"申请控制"和"请求开启"用的是同一个
+// 密码框、同一个暗号。两处各写一份的话,交替着填就等于把 8 次翻倍,而
+// maxPwFails 那段注释里说的"闸"就形同虚设。
+func (s *Server) passwordFail(sess *session) bool {
+	sess.pwFails++
+	if sess.pwFails < maxPwFails {
+		return false
+	}
+	log.Printf("远程控制:%s 控制密码连续错误 %d 次,断开", sess.label, sess.pwFails)
+	sess.write(serverMsg{Type: "err", Code: errAuth, Msg: "控制密码连续错误太多次"})
+	sess.close()
+	_ = sess.conn.Close(websocket.StatusPolicyViolation, "控制密码错误")
+	return true
+}
+
 // handleCtl 处理控制权协商。
 func (s *Server) handleCtl(sess *session, m clientMsg) {
 	switch m.Act {
 	case actRequest:
+		// 远控没开的时候不受理控制申请。
+		//
+		// 请求入口让"端口在监听、远控没开"成为常态,而控制申请在那种状态下
+		// 没有意义 —— 更糟的是它会占掉那份唯一的待批名额,让真正的开启请求
+		// 排在后面。观众要的是用 t="open" 那条路。
+		if !s.isEnabled() {
+			sess.write(serverMsg{Type: msgCtl, State: stateIdle, Reason: "主机还没有开启远程控制"})
+			return
+		}
+
 		pw := s.currentPassword()
 		// 主机没设密码时 pw 是空串,passwordMatch 一律不匹配 ——
 		// 于是这里自然退回"申请 → 主机批准"那条老路。
@@ -53,7 +85,7 @@ func (s *Server) handleCtl(sess *session, m clientMsg) {
 		if authOK {
 			state = s.control.grantIfFree(sess.id, sess.label)
 		} else {
-			state = s.control.request(sess.id, sess.label)
+			state = s.control.request(sess.id, sess.label, pendingControl)
 		}
 
 		wrongPw := pw != "" && m.Pw != "" && !authOK
@@ -73,12 +105,7 @@ func (s *Server) handleCtl(sess *session, m clientMsg) {
 		} else if wrongPw {
 			// 只有"主机设了密码 + 对方确实填了"才算一次失败 ——
 			// 完全没填是正常用法(等人批准),不该计入。
-			sess.pwFails++
-			if sess.pwFails >= maxPwFails {
-				log.Printf("远程控制:%s 控制密码连续错误 %d 次,断开", sess.label, sess.pwFails)
-				sess.write(serverMsg{Type: "err", Code: errAuth, Msg: "控制密码连续错误太多次"})
-				sess.close()
-				_ = sess.conn.Close(websocket.StatusPolicyViolation, "控制密码错误")
+			if s.passwordFail(sess) {
 				return
 			}
 		}
@@ -126,6 +153,16 @@ func stateReason(state string) string {
 // 不是控制者的事件在这里就被丢掉。必须拦在这一层:放到注入那边再拦的话,
 // 队列里会混进别人的操作,而"谁按的"在那个位置已经分不出来了。
 func (s *Server) handleInput(sess *session, m clientMsg) {
+	// 远控授权没开的时候一律丢弃。
+	//
+	// 这一条在以前是多余的:没开远控就没有会话,没有会话就不可能有控制者。
+	// 请求入口让"端口在监听、远控没开"成了常态,所以它不再多余 —— 它现在
+	// 是"先开启、后授权"那个顺序的最后一道防线。哪天有人把那个顺序写反了,
+	// 没有这一句,那段窗口里注入的事件会真的落到主机的鼠标键盘上,而界面
+	// 上写着"远控未开启"。
+	if !s.isEnabled() {
+		return
+	}
 	if s.control.holder() != sess.id {
 		return
 	}

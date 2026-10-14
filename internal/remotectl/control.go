@@ -20,13 +20,19 @@ type waiter struct {
 	id    string
 	label string // 给主机看的标识,通常是对方的 IP
 	at    time.Time
+	kind  string // pendingControl 或 pendingOpen,见 server.go
 }
 
 func describe(w *waiter) *Pending {
 	if w == nil {
 		return nil
 	}
-	return &Pending{ID: w.id, RemoteIP: w.label, At: w.at.Format(time.RFC3339)}
+	return &Pending{
+		ID:       w.id,
+		Kind:     w.kind,
+		RemoteIP: w.label,
+		At:       w.at.Format(time.RFC3339),
+	}
 }
 
 // control 是控制权仲裁。
@@ -45,8 +51,19 @@ type control struct {
 	pending *waiter // 非 nil 表示有申请在等批准
 }
 
-// request 记录一次控制申请,返回应当回给这个会话的状态。
-func (c *control) request(id, label string) string {
+// request 记录一次申请(要控制权,或者要开启),返回应当回给这个会话的状态。
+//
+// kind 只影响"主机点了允许之后该做什么",不影响排队规则:
+//
+//   - 两个 kind 共享同一个 owner 和同一个 pending 名额。有人正在申请控制时,
+//     另一个人的"请求开启"同样得到 busy。理由和下面那段一样 —— 排队会出现
+//     "申请成功却还是动不了"的错觉;而且两种申请挤在一个名额里,主机那一侧
+//     无论如何也只会看到一份待批,不用去解释"为什么有两个弹窗"。
+//   - 唯一按 kind 区分的是重复申请:同一个会话重复发同一种申请不该重置计时。
+//     跨 kind 的重复(先申请控制、又请求开启)走的是普通的新申请,如果它
+//     自己已经占着那个名额,也应当原样返回 pending —— 这里用 id 比较就够了,
+//     因为名额只有一个,而占着它的正是他自己。
+func (c *control) request(id, label, kind string) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -63,7 +80,7 @@ func (c *control) request(id, label string) string {
 		return stateBusy
 	}
 
-	c.pending = &waiter{id: id, label: label, at: time.Now()}
+	c.pending = &waiter{id: id, label: label, at: time.Now(), kind: kind}
 	return statePending
 }
 
@@ -99,33 +116,50 @@ func (c *control) grantIfFree(id, label string) string {
 		return stateGranted
 	}
 
-	c.owner = &waiter{id: id, label: label, at: time.Now()}
+	c.owner = &waiter{id: id, label: label, at: time.Now(), kind: pendingControl}
 	return stateGranted
 }
 
-// approve 把控制权交给正在等批准的那个会话。
-func (c *control) approve(id string) bool {
+// approve 处理一次"主机点了允许":把待批名额交出去,并告诉调用方等的是
+// 哪一种申请(主机点完允许之后要做什么,完全取决于它)。
+//
+// **两种申请在这里的处理不一样,这个差异是整个功能的安全要点:**
+//
+//   - 控制申请:名额直接变成控制权。
+//   - 开启请求:名额只是被收走 —— pending 清空,于是主机的弹窗关掉、别人
+//     也能接着排队;但控制权**先不给**。开启请求接下来还要去把共享和远控
+//     真正打开,而那一步会失败。失败时不能留下一个"界面说你正在控制、
+//     实际按什么都没反应"的状态,更不能先把控制权交出去再谈开启 ——
+//     输入那条路上只看"你是不是控制者"(见 handleInput)。
+//     控制权由调用方在开启**成功之后**用 grantIfFree 补上。
+func (c *control) approve(id string) (kind string, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.pending == nil || c.pending.id != id {
-		return false
+		return "", false
 	}
-	c.owner = c.pending
+	kind = c.pending.kind
+	if kind == pendingControl {
+		c.owner = c.pending
+	}
 	c.pending = nil
-	return true
+	return kind, true
 }
 
 // deny 拒绝一份申请。主机点"拒绝"和申请超时都走这里。
-func (c *control) deny(id string) bool {
+//
+// 同样要带出 kind —— 回给观众的措辞按申请种类分。
+func (c *control) deny(id string) (kind string, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.pending == nil || c.pending.id != id {
-		return false
+		return "", false
 	}
+	kind = c.pending.kind
 	c.pending = nil
-	return true
+	return kind, true
 }
 
 // revoke 把控制权收回来,不管现在是谁在控制。
@@ -185,17 +219,17 @@ func (c *control) drop(id string) (wasOwner bool) {
 	return wasOwner
 }
 
-// expire 清掉已经等了太久的申请,返回它的会话 ID。
-func (c *control) expire(now time.Time) (id string, ok bool) {
+// expire 清掉已经等了太久的申请,返回它的会话 ID 和种类。
+func (c *control) expire(now time.Time) (id, kind string, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.pending == nil || now.Sub(c.pending.at) < PendingTimeout {
-		return "", false
+		return "", "", false
 	}
-	id = c.pending.id
+	id, kind = c.pending.id, c.pending.kind
 	c.pending = nil
-	return id, true
+	return id, kind, true
 }
 
 // holder 返回当前控制者的会话 ID,没有则返回空串。

@@ -26,6 +26,59 @@ func (s *Server) SetRemoteControlEnabled(on bool) error {
 	})
 }
 
+// SetRequestEntry 开关"请求开启"入口。它也走 applyRemoteControl。
+func (s *Server) SetRequestEntry(on bool) error {
+	return s.applyRemoteControl(func(rc *config.RemoteControlConfig) {
+		rc.RequestEntry = on
+	})
+}
+
+// approveOpen 落地一次"请求开启共享与远控":开始共享 + 打开远控。
+//
+// 拆成接收三个依赖的纯函数,而不是直接写 s.stream / s.SetRemoteControlEnabled:
+// 这条路上最容易出问题的是**部分成功**(远控开不起来但共享能开、或者反过来),
+// 而那种矩阵要能一个个试过去 —— 真起一个推流管理器和远控服务是测不动的。
+// 和 audioHint、popupController 是同一个路数。
+//
+// 顺序**先远控、后共享**:
+//
+//   - 远控那一步是会失败的那个(采集源不支持、端口被占),先做它,失败就能
+//     立刻报给远端,而不是先拉起一条流再来说"其实没完全成功"。
+//   - 共享用"本来就在跑"挡一下:已经在推流时再 Start 一次会重启采集,
+//     观众那边就是一次没必要的黑屏。
+func approveOpen(sharing bool, start func(), enable func(bool) error) remotectl.OpenResult {
+	var out remotectl.OpenResult
+
+	if err := enable(true); err != nil {
+		out.Err = fmt.Errorf("远程控制没能打开:%w", err)
+	} else {
+		out.Remote = true
+	}
+
+	// 远控没开成也照样开始共享:画面还是能看的,只是不能操作。把两件事
+	// 绑在一起做全有或全无,会让"采集源不支持远控"这种机器连看都看不成,
+	// 而那是它们本来就能做的事。
+	if !sharing {
+		start()
+	}
+	out.Sharing = true
+
+	return out
+}
+
+// ApproveOpen 是 approveOpen 在生产里的接线:主机同意一次"请求开启"之后,
+// 由 remotectl 通过 Options.OnApproveOpen 调回来。
+//
+// 导出是因为它要跨包交给 remotectl(和这个包里别的 handler 不一样 ——
+// 那些只挂在 mux 上,不用给谁看)。
+func (s *Server) ApproveOpen() remotectl.OpenResult {
+	return approveOpen(
+		s.stream.Status().Running,
+		s.stream.Start,
+		s.SetRemoteControlEnabled,
+	)
+}
+
 // applyRemoteControl 把远控配置真正落到位:写配置、开/关监听、同步路由器映射。
 //
 // 这三个动作必须一起做,少任何一个都会留下一个"界面显示已开启但其实
@@ -40,11 +93,14 @@ func (s *Server) applyRemoteControl(mutate func(*config.RemoteControlConfig)) er
 	mutate(&next.RemoteControl)
 	next.Normalize() // 端口非法时退回默认值,别让一个坏数字传下去
 
-	// 令牌在第一次开启时才生成。
+	// 令牌在第一次需要它的时候生成 —— 远控开了,或者请求入口开着。
 	//
 	// 不在默认配置里预生成,是为了让"从没用过这个功能"的配置文件里
 	// 不躺着一串没人认识的秘密 —— 那种东西过一阵子就没人敢删了。
-	if next.RemoteControl.Enabled && next.RemoteControl.Token == "" {
+	// 但请求入口默认就是开的,所以实际效果是"装好第一次跑就有一串",
+	// 这是它的代价的一部分:没有令牌,那条链接就发不出去。
+	if (next.RemoteControl.Enabled || next.RemoteControl.RequestEntry) &&
+		next.RemoteControl.Token == "" {
 		tok, err := remotectl.NewToken()
 		if err != nil {
 			return fmt.Errorf("生成凭据失败: %w", err)
@@ -57,9 +113,14 @@ func (s *Server) applyRemoteControl(mutate func(*config.RemoteControlConfig)) er
 	}
 
 	// 换端口必须先把监听拆掉,否则旧的还占着,新的绑不上。
-	if next.RemoteControl.Port != before.RemoteControl.Port && before.RemoteControl.Enabled {
+	//
+	// 判据是"本来有没有在监听"(两个开关任一为真),不是只看 Enabled ——
+	// 只按 Enabled 找,请求入口开着而远控关着的时候换端口,旧监听会一直
+	// 占着旧端口不放,而新端口永远绑不上。
+	if next.RemoteControl.Port != before.RemoteControl.Port && before.RemoteControl.MappedPort() != 0 {
 		s.remote.DisconnectAll()
 		_ = s.remote.SetEnabled(false)
+		_ = s.remote.SetRequestEntry(false)
 	}
 	s.remote.Configure(next.RemoteControl.Port, next.RemoteControl.Token,
 		next.RemoteControl.ControlPassword, next.RemoteControl.AllowClipboard)
@@ -71,6 +132,9 @@ func (s *Server) applyRemoteControl(mutate func(*config.RemoteControlConfig)) er
 	// 防火墙没放行),用户下次启动仍然想要这个功能;把开关退回去等于让他
 	// 每次都得重新勾一遍,而真正的原因会随 Status 一起报出来。
 	err := s.remote.SetEnabled(next.RemoteControl.Enabled)
+	if err == nil {
+		err = s.remote.SetRequestEntry(next.RemoteControl.RequestEntry)
+	}
 
 	// 远控开关还决定视频里画不画主机光标(见 ffmpeg.CaptureOptsFor),而那是
 	// ffmpeg 的启动参数 —— 开关一变就得重启采集。这是这个开关唯一的代价:
@@ -103,10 +167,10 @@ func (s *Server) cursorHidden(c config.Config) bool {
 	return !ffmpeg.CaptureOptsFor(c.Video, c.RemoteControl.Enabled).DrawMouse
 }
 
-// handleRCEnable 开关远程控制,顺带可以改端口。
+// handleRCEnable 开关远程控制、开关请求入口,顺带可以改端口。
 //
-// 开启是这个程序里唯一会新增对外监听的入口,所以这里做的每一件事都要
-// 能解释清楚:生成令牌(首次)、写配置、真正开监听、把端口加进路由器映射。
+// 开启是这个程序里会新增对外监听的入口,所以这里做的每一件事都要能解释
+// 清楚:生成令牌(首次)、写配置、真正开监听、把端口加进路由器映射。
 func (s *Server) handleRCEnable(w http.ResponseWriter, r *http.Request) {
 	if s.remote == nil {
 		s.rcUnavailable(w)
@@ -117,10 +181,11 @@ func (s *Server) handleRCEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 两个字段都是可选的:端口走同一个端点改,但只改端口时不该顺手把
-	// 开关也动一下。用指针才能区分"没填"和"填了 false"。
+	// 字段全是可选的:端口走同一个端点改,但只改端口时不该顺手把开关也
+	// 动一下。用指针才能区分"没填"和"填了 false"。
 	var req struct {
 		Enabled         *bool   `json:"enabled"`
+		RequestEntry    *bool   `json:"requestEntry"`
 		Port            *int    `json:"port"`
 		AllowClipboard  *bool   `json:"allowClipboard"`
 		ControlPassword *string `json:"controlPassword"`
@@ -133,6 +198,9 @@ func (s *Server) handleRCEnable(w http.ResponseWriter, r *http.Request) {
 	err := s.applyRemoteControl(func(rc *config.RemoteControlConfig) {
 		if req.Enabled != nil {
 			rc.Enabled = *req.Enabled
+		}
+		if req.RequestEntry != nil {
+			rc.RequestEntry = *req.RequestEntry
 		}
 		if req.Port != nil {
 			rc.Port = *req.Port
@@ -276,8 +344,12 @@ func (s *Server) remoteLinks(cfg config.Config) []watchURL {
 
 // syncPortMapRules 按当前配置刷新路由器上要开的端口。
 //
-// 远控端口只在远控开着的时候才映射 —— 这是"默认关闭 = 零攻击面"那句话
-// 在路由器上的落实:不开启时,公网上不会多出任何一个指向本机的洞。
+// 远控端口在**端口会监听**的时候才映射(远控开着、或者请求入口开着,见
+// MappedPort)。请求入口那条是有意的:它的全部意义就是"远端的人够得到"，
+// 不映射就只剩局域网能用,名不副实。
+//
+// 真正把它暴露到公网还要 AutoPortMap 也打开(默认关),所以默认配置是
+// "监听 8090,但路由器上没有洞"。
 func (s *Server) syncPortMapRules(cfg config.Config) {
 	if s.portMap == nil {
 		return

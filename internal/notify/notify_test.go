@@ -43,6 +43,31 @@ func TestDescribe(t *testing.T) {
 
 // 秒数**不能**被烤进正文。
 //
+// 开启请求的措辞必须把"同意之后会发生什么"说全。
+//
+// 这个功能把原来分开的两次确认(开共享 / 允许操作)合成了一次,所以这一句
+// 话是主机唯一的知情来源。少了"会开始共享画面"这半句,主机无从知道自己的
+// 屏幕将被共享出去 —— 他看到的只是"有人请求开启",而"开启"指什么并不显然。
+func TestDescribeOpenRequest(t *testing.T) {
+	title, body := Describe(Request{IP: "10.0.0.1", Timeout: time.Minute, Kind: KindOpen})
+
+	if !strings.Contains(title, "共享") {
+		t.Errorf("开启请求的标题要提到共享,得到 %q", title)
+	}
+	for _, want := range []string{"10.0.0.1", "共享", "操作"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("正文里没有 %q:%q", want, body)
+		}
+	}
+
+	// 控制申请的措辞**不能**被带上这句 —— 那种情况下主机根本没同意过
+	// 共享画面,写上去是吓人。
+	_, ctlBody := Describe(Request{IP: "10.0.0.1", Timeout: time.Minute})
+	if strings.Contains(ctlBody, "共享") {
+		t.Errorf("控制申请的正文不该提共享:%q", ctlBody)
+	}
+}
+
 // 倒计时每秒都在变,而 Describe 只在弹窗创建时跑一次 —— 秒数一旦写进
 // 正文,显示的就永远是弹出那一刻的数字,之后一动不动。这条测的就是
 // 那个回归:正文里不该出现任何秒数。

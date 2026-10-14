@@ -23,6 +23,13 @@ type Injector interface {
 	KeyEvent(vk uint16, extended, down bool) error
 	TypeText(s string) error
 	ElevatedForeground() bool
+
+	// HostActive 报告本机用户此刻在不在操作这台机器(1 秒内有他自己的输入)。
+	//
+	// 本机用户优先:他在用的时候注入一律让路,免得两边抢同一个鼠标。
+	// 实现见 internal/input 的 HostActive —— 那里要把"注入的输入"从
+	// "用户自己的输入"里分出来,不能直接拿 GetLastInputInfo 当空闲判断。
+	HostActive() bool
 }
 
 // osInjector 是 Injector 的真实实现,直接转发给 internal/input。
@@ -40,6 +47,7 @@ func (osInjector) KeyEvent(vk uint16, extended, down bool) error {
 }
 func (osInjector) TypeText(s string) error  { return input.TypeText(s) }
 func (osInjector) ElevatedForeground() bool { return input.ElevatedForeground() }
+func (osInjector) HostActive() bool         { return input.HostActive() }
 
 // 注入队列的容量和超时。
 const (
@@ -56,6 +64,14 @@ const (
 
 	// rateWindow 是上面那个计数的窗口长度。
 	rateWindow = time.Second
+
+	// hostCheckInterval 是"主机在不在操作"的兜底检查间隔。
+	//
+	// 事件进来时那次检查只覆盖"观众正在动"的情况。观众按住不放(拖动、
+	// 或者按着 Ctrl 等下一个键)的时候没有任何事件流进来,而主机一样需要
+	// 拿回自己的鼠标 —— 那个按钮是已经按下去的,主机一动就变成拖拽。
+	// 250ms 是"主机察觉不到"和"别白跑"之间的折中。
+	hostCheckInterval = 250 * time.Millisecond
 
 	// writeTimeout 是往观众端写一条消息的上限。
 	writeTimeout = 5 * time.Second
@@ -112,6 +128,19 @@ type session struct {
 	// 所以丢多少次都不影响正确性。
 	notify chan struct{}
 	done   chan struct{}
+
+	// 下面这一组记的是"有哪些键鼠是我们按下去的、还没松开",以及"当前
+	// 是不是在给主机让路"。
+	//
+	// 只在注入协程上读写(apply、noteHeld、releaseHeld、suspend/resume
+	// 全在那一条上),所以不加锁 —— 和 pwFails 同一个路数。
+	//
+	// 为什么要记:观众按住左键拖拽的时候主机一动鼠标,注入停下,而那个
+	// 左键是**我们已经按下去了**的。不替它补一个抬起,主机接下来自己点的
+	// 每一下都会变成拖拽。
+	heldButtons    uint32          // 按 input.Button 编号的位
+	heldKeys       map[uint16]bool // vk → 是不是扩展键(抬起时要原样带回去)
+	inputSuspended bool
 
 	// pwFails 是这条连接上控制密码连错的次数,见 messages.go 的 maxPwFails。
 	//
@@ -208,10 +237,24 @@ func (s *session) close() {
 // 每个会话一个,但同一时刻只有一个会话能拿到控制权,所以实际上只有
 // 控制者这条在干活 —— 别人的事件在 readPump 里就被丢掉了。
 func (s *session) injectLoop() {
+	// 兜底检查,见 hostCheckInterval 那段。
+	hostTick := time.NewTicker(hostCheckInterval)
+	defer hostTick.Stop()
+
 	for {
 		select {
 		case <-s.done:
 			return
+		case <-hostTick.C:
+			// 只在控制权还在自己手上时才有意义。谁都轮不到的时候注入本来
+			// 就不发,让路状态也就无从谈起。
+			if s.srv.control.holder() == s.id {
+				if s.srv.inject.HostActive() {
+					s.suspendInput()
+				} else {
+					s.resumeInput()
+				}
+			}
 		case <-s.notify:
 		}
 
@@ -222,14 +265,103 @@ func (s *session) injectLoop() {
 			}
 			// 取事件之前可能已经被收回控制权了,再确认一次 ——
 			// 队列里可能还压着夺权之前塞进来的几个事件。
+			//
+			// 顺带把按着的东西放开:控制权没了,而观众是按着左键被夺权的
+			// (拖拽中途被收回、连接断了),那个左键会一直按在主机那里 ——
+			// 无论接下来是谁在控制,主机自己的鼠标都是坏的。
 			if s.srv.control.holder() != s.id {
+				s.releaseHeld()
+				s.inputSuspended = false
 				continue
 			}
+			// 本机用户优先:他在用这台机器的时候,注入一律让路。
+			//
+			// 丢弃而不是排队:攒着等主机停下来再一次性倒出去,那是在
+			// 重放一段没人记得的操作(而且最长要等一秒),比直接丢掉糟
+			// 得多。丢在这里也**不会**积压 —— 循环照样把队列掏空,
+			// 只是不往系统里送。
+			if s.srv.inject.HostActive() {
+				s.suspendInput()
+				continue
+			}
+			s.resumeInput()
+
 			if err := s.apply(ev); err != nil {
 				s.reportInjectError(err)
+				continue
 			}
+			// 送出去了才记 —— 注入失败时系统那边并没有按下什么。
+			s.noteHeld(ev)
 		}
 	}
+}
+
+// noteHeld 记下刚刚注入成功的按键状态。只在注入协程上调用。
+func (s *session) noteHeld(ev injEvent) {
+	switch ev.kind {
+	case injButton:
+		bit := uint32(1) << uint(ev.button)
+		if ev.down {
+			s.heldButtons |= bit
+		} else {
+			s.heldButtons &^= bit
+		}
+	case injKey:
+		if !ev.down {
+			delete(s.heldKeys, ev.vk)
+			return
+		}
+		if s.heldKeys == nil {
+			s.heldKeys = map[uint16]bool{}
+		}
+		s.heldKeys[ev.vk] = ev.extended
+	}
+}
+
+// releaseHeld 把还按着的键鼠补一个抬起。
+//
+// 配合 suspendInput 用:让路之前必须先把手里按着的东西放下,否则那一下就
+// 一直按在主机那儿 —— 主机自己点的每一下都会变成拖拽(或者是按住 Ctrl)。
+func (s *session) releaseHeld() {
+	// 失败不管:这里能失败的原因基本只有 UIPI(前台窗口是管理员),而那件
+	// 事已经由 ElevatedForeground 在控制页上报着了。每个键报一次只会把
+	// 真正的原因淹掉。
+	for b := input.BtnLeft; b <= input.BtnX2; b++ {
+		if s.heldButtons&(1<<uint(b)) == 0 {
+			continue
+		}
+		_ = s.srv.inject.ButtonEvent(b, false)
+	}
+	s.heldButtons = 0
+
+	for vk, ext := range s.heldKeys {
+		_ = s.srv.inject.KeyEvent(vk, ext, false)
+	}
+	s.heldKeys = nil
+}
+
+// suspendInput 让路:松开按着的东西,并且只通知一次。
+//
+// 幂等 —— 注入协程是"丢掉一个事件就调一次",而松开和通知只该发生在进入
+// 暂停的那一刻。主机一直在操作的时候,这条消息每次输入都要发的话,那比
+// 不通知还烦人。
+func (s *session) suspendInput() {
+	if s.inputSuspended {
+		return
+	}
+	s.inputSuspended = true
+	s.releaseHeld()
+	// 告诉观众为什么点了没反应。不说的话,这就是个彻头彻尾的谜。
+	s.write(serverMsg{Type: msgHold, State: holdOn})
+}
+
+// resumeInput 主机停手了,恢复注入。同样是幂等的,只在恢复那一刻通知一次。
+func (s *session) resumeInput() {
+	if !s.inputSuspended {
+		return
+	}
+	s.inputSuspended = false
+	s.write(serverMsg{Type: msgHold, State: holdOff})
 }
 
 func (s *session) apply(ev injEvent) error {
@@ -271,7 +403,15 @@ func (s *session) reportInjectError(err error) {
 // ---------- 收发 ----------
 
 // write 往观众端写一条消息。
+//
+// conn 为 nil 时什么都不做。nil 是测试里用的替身(见 newSession 的调用点),
+// 不是运行时状态 —— 真实会话一定带着连接。有了这一句,那些只关心"状态机
+// 怎么走"的测试不必为了凑一条 WebSocket 而把整条链路架起来。
 func (s *session) write(m serverMsg) {
+	if s.conn == nil {
+		return
+	}
+
 	data, err := json.Marshal(m)
 	if err != nil {
 		return

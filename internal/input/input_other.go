@@ -18,3 +18,7 @@ func KeyEvent(vk uint16, extended, down bool) error { return ErrUnsupported }
 func TypeText(s string) error { return ErrUnsupported }
 
 func ElevatedForeground() bool { return false }
+
+// HostActive 在没有注入能力的平台上恒为 false —— "主机在不在操作"是给
+// "要不要让开"用的,而这里根本不会注入,没有让开这回事。
+func HostActive() bool { return false }

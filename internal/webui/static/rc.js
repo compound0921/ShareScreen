@@ -20,6 +20,7 @@ const els = {
   startBtn: document.getElementById('startBtn'),
   status: document.getElementById('status'),
   ctlBtn: document.getElementById('ctlBtn'),
+  openBtn: document.getElementById('openBtn'),
   pwInput: document.getElementById('pwInput'),
   releaseBtn: document.getElementById('releaseBtn'),
   ctlInfo: document.getElementById('ctlInfo'),
@@ -66,6 +67,26 @@ const state = {
   closedByUs: false,
   // rotate 是主机要求把画面转回来的角度(0/180),见 main 里那段说明。
   rotate: 0,
+
+  // cfg 是 /rc/config 拉回来的那份配置。留着是因为主机同意之后要重新
+  // 拉一次流,而那时候不该再跑一遍整页启动流程(见 startVideoWithRetry)。
+  cfg: null,
+
+  // 下面这四个都是**主机那侧**的开关,页面只读它们:
+  //
+  //   remoteEnabled 远控开着没有 —— 决定这一排按钮出现的是"申请控制"
+  //                 还是"请求开启共享与远控"。两者互斥。
+  //   sharing       主机在不在推流 —— 决定要不要去拉流。没推流时拉必然
+  //                 失败,而那句失败提示会把"等主机同意"说成"出错"。
+  //   passwordSet   主机设没设控制密码 —— 决定密码框显不显示。
+  //   openPending   这次的开启请求是不是还在等主机点同意。
+  remoteEnabled: false,
+  sharing: false,
+  passwordSet: false,
+  openPending: false,
+
+  // held 表示主机此刻自己在用键鼠,注入被让开了(见 setHeld)。
+  held: false,
 };
 
 // ───────────────────────── 启动 ─────────────────────────
@@ -111,6 +132,10 @@ async function main() {
     els.video.style.transform = `rotate(${state.rotate}deg)`;
   }
 
+  state.cfg = cfg;
+  state.remoteEnabled = !!cfg.remote;
+  state.sharing = !!cfg.sharing;
+
   els.startBtn.hidden = false;
   els.startBtn.addEventListener('click', () => {
     // 这次点击同时解决两件事:浏览器要求"有用户操作"才允许播放声音。
@@ -120,14 +145,36 @@ async function main() {
   });
 
   // 先把 WebSocket 连起来 —— 控制权协商和画面是两件独立的事,
-  // 画面慢不该拖住"申请控制"。
+  // 画面慢不该拖住"申请控制"。而且共享还没开始的时候,这条连接是
+  // 唯一能让主机知道"有人想连上来"的路。
   connectWS();
+
+  // 主机还没开始推流:这时候拉流必然失败,而那句失败提示会把"在等主机
+  // 同意"说成"出错了"。改成把请求按钮露出来。
+  if (!state.sharing) {
+    showRequestOverlay();
+    return;
+  }
 
   try {
     await startVideo(cfg);
   } catch (e) {
     fail('拿不到画面', String(e && e.message ? e.message : e));
   }
+}
+
+// showRequestOverlay 是"主机还没开始共享"时那块遮罩的样子。
+//
+// 措辞很要紧:这时候页面一片黑不是因为坏了,而是因为主机还没开始。写成
+// "拿不到画面",用户会去查网络、查防火墙,而该做的事只是点一下按钮。
+function showRequestOverlay() {
+  els.overlay.hidden = false;
+  els.overlayMsg.textContent = '主机还没有开始共享';
+  els.overlayHint.textContent =
+    '点下面的「请求开启共享与远控」,主机同意之后这里会自动连上画面。';
+  els.startBtn.hidden = true;
+  setStatus('未开始', 'badge-idle');
+  applyOpenUI();
 }
 
 function fail(title, detail) {
@@ -234,6 +281,10 @@ async function startVideo(cfg) {
   // 一个局域网地址都不通 —— 那就是真的在外面),所以照旧。
   state.whepBase = `${location.protocol}//${location.hostname}:${cfg.whepPort}/${cfg.path}`;
 
+  // 先把上一条会话收掉。主机同意开启之后我们会再调一次(见
+  // startVideoWithRetry),不收的话每重试一轮就多留一个连接。
+  closeVideo();
+
   const pc = new RTCPeerConnection({ iceServers: [] });
   state.pc = pc;
 
@@ -284,6 +335,24 @@ async function startVideo(cfg) {
   state.ready = true;
 }
 
+// closeVideo 把当前这条 WHEP 会话收掉(连接和 MediaMTX 那边的会话都收)。
+//
+// 不等 DELETE 的结果:它失败只是让主机的观众数多挂一会儿,不该拖住
+// 重新拉流 —— 而"重新拉流"正是主机刚点了同意的那一刻。
+function closeVideo() {
+  if (state.pc) {
+    try {
+      state.pc.close();
+    } catch { /* 关不掉就算了,下面会建一个新的 */ }
+    state.pc = null;
+  }
+  if (state.sessionURL) {
+    fetch(state.sessionURL, { method: 'DELETE' }).catch(() => {});
+    state.sessionURL = '';
+  }
+  state.ready = false;
+}
+
 // waitIceGathering 等到候选收集完再发 offer。
 //
 // WHEP 不带 trickle:offer 里的候选必须一次发全,否则对方只知道一部分
@@ -331,6 +400,9 @@ function connectWS() {
 
   ws.onclose = () => {
     setControlling(false);
+    // setControlling 只管控制权那套按钮,它会把「申请控制」放出来。远控
+    // 没开的时候那个按钮是错的(点了服务端也不受理),所以再摆一次。
+    applyOpenUI();
     if (state.closedByUs) return;
 
     // 凭据不对时服务端是拒绝握手,浏览器只能给一个笼统的 1006 ——
@@ -367,18 +439,39 @@ function handleMsg(m) {
   switch (m.t) {
     case 'hello':
       state.sessionId = m.you;
-      els.ctlBtn.hidden = false;
+      // 这两个是**当下**的主机状态,不是页面缓存的。页面完全可能是主机
+      // 点完同意之后才刷新出来的 —— 那时候该显示的是"申请控制",而不是
+      // 一个已经过时的"请求开启"。
+      state.remoteEnabled = !!m.remote;
+      state.sharing = !!m.sharing;
       // 主机没开剪贴板同步就整个藏起来 —— 显示一个点了没反应的按钮
       // 比不显示更让人困惑。
       els.clipBtn.hidden = !m.clipboard;
       // 密码框同理:主机没设密码时,摆一个填了也没用的框只会让人以为
       // 必须先填点什么才能申请。填了框里的东西跟申请一起送上去,主机
       // 那侧比对通过就直接给控制权,不用他点允许。
-      els.pwInput.hidden = !m.passwordSet;
+      state.passwordSet = !!m.passwordSet;
+      // 远控开着、画面也在:按钮归控制权那套状态机管,先让它摆一次。
+      //
+      // 重连也会走到这里,而重连是个**新会话** —— 断开时那个会话的待批
+      // 申请在服务端已经作废了(removeSession → control.drop),所以这里
+      // 回到"可以申请"是对的,不是把排队状态弄丢了。
+      if (state.remoteEnabled && state.sharing) {
+        applyCtlState('idle', '');
+      }
+      applyOpenUI();
       break;
 
     case 'ctl':
       applyCtlState(m.state, m.reason);
+      break;
+
+    case 'open':
+      applyOpenState(m.state, m.reason);
+      break;
+
+    case 'hold':
+      setHeld(m.state === 'on');
       break;
 
     case 'clip':
@@ -391,7 +484,142 @@ function handleMsg(m) {
   }
 }
 
+// ───────────────── 请求开启共享与远控 ─────────────────
+//
+// 远控还没开的时候,这个页面能做的只有一件事:请主机把它开起来 —— 共享
+// 顺带一起开,那是主机那一次批准同时决定的两件事(措辞在主机端的弹窗上)。
+//
+// 两个按钮(申请控制 / 请求开启)互斥,由 state.remoteEnabled 决定出现哪
+// 一个。远控开着的时候一切照旧,这套东西完全不参与。
+//
+// 这一整套只在**主播还没开远控**时用得上,而这个状态现在很常见:请求入口
+// 让远控端口默认就听着,所以远端的人随时可能连上来,看到的是这个页面。
+
+// applyOpenUI 决定那一排按钮里该出现哪一个。
+//
+// 只有这一个地方决定这几个按钮的显隐,因为"哪个按钮该在"是个整体判断。
+// 分散到各处去改 hidden,必然出现两个都亮着(或者都不亮)的状态。
+function applyOpenUI() {
+  els.pwInput.hidden = !state.passwordSet;
+
+  // 远控开着**而且**画面在:这一排按钮完全归控制权那套状态机管
+  // (applyCtlState / setControlling),这里只把"请求开启"收起来。
+  //
+  // 注意"而且画面在"这半句不能省。远控开着但主机没在推流的时候,屏幕上
+  // 一片黑,而观众手上得有东西可点 —— 那个东西就是"请求开启(共享)"。
+  if (state.remoteEnabled && state.sharing) {
+    els.openBtn.hidden = true;
+    return;
+  }
+
+  // 要么远控没开、要么画面还没起来。两种情况观众唯一的出路都是"请求开启":
+  // 远控没开是要开远控,没画面是要开共享(见主机端 requestOpen —— 这两种
+  // 它都受理)。
+  els.ctlBtn.hidden = true;
+  // 请求已经发出去了就不该再点一次 —— 那个位置让给「取消请求」。
+  els.openBtn.hidden = state.openPending;
+  els.releaseBtn.hidden = !state.openPending;
+  els.releaseBtn.textContent = '取消请求';
+}
+
+function applyOpenState(s, reason) {
+  switch (s) {
+    case 'pending':
+      state.openPending = true;
+      setStatus('等待主机同意…', 'badge-warn');
+      els.ctlInfo.textContent = reason || '主机的屏幕上会出现同意提示,请稍候';
+      break;
+
+    case 'opened':
+      state.openPending = false;
+      // 主机同意了。远控此刻是开着的、共享也开始了 —— 本页接下来就是
+      // 原来那套"看画面 + 申请控制"。
+      //
+      // **先**把 remoteEnabled 置上再动按钮,否则下面的 setControlling
+      // 会被 applyOpenUI 当成"远控没开"而拒绝显示控制中那套界面。
+      state.remoteEnabled = true;
+      state.sharing = true;
+      setStatus('正在连接画面…', 'badge-idle');
+      // 按钮交给控制权那套状态机:紧跟其后多半会来一条 ctl:granted
+      // 把它变成"控制中";没来(有人在控制)的时候,这里先摆出"申请控制"。
+      applyCtlState('idle', reason || '');
+      startVideoWithRetry();
+      break;
+
+    case 'denied':
+      state.openPending = false;
+      setStatus('未开启', 'badge-idle');
+      els.ctlInfo.textContent = reason || '主机拒绝了这次请求';
+      break;
+
+    case 'failed':
+      state.openPending = false;
+      setStatus('开启失败', 'badge-error');
+      els.ctlInfo.textContent = reason || '';
+      showError(reason || '主机同意之后没能开启。');
+      // 共享那一半可能成了(v0.1 起远控失败也照样开始共享,见
+      // internal/server/remote.go 的 approveOpen)—— 那就先把画面接上,
+      // 能看总比黑着强。
+      if (/共享已开始/.test(reason || '')) startVideoWithRetry();
+      break;
+
+    case 'idle':
+      state.openPending = false;
+      els.ctlInfo.textContent = reason || '';
+      break;
+  }
+  applyOpenUI();
+}
+
+// startVideoWithRetry 在主机刚同意之后接画面。
+//
+// **必须重试。** "主机点了同意"和"MediaMTX 里真的有一条流"之间隔着 ffmpeg
+// 起来、编码器探测、推上去这几步,实测要一两秒。只拉一次的话,那几秒里页面
+// 会停在"拿不到画面" —— 而用户刚看到主机同意了,这是最容易被当成"点了没用"
+// 的一刻。
+async function startVideoWithRetry() {
+  const delays = [0, 500, 1000, 1500, 2000, 2500];
+  let lastErr = null;
+
+  for (const d of delays) {
+    if (d) await new Promise((r) => setTimeout(r, d));
+    // 期间主机可能又把远控关了(或者用户自己跳走了),那就别再试了。
+    if (state.closedByUs) return;
+    try {
+      await startVideo(state.cfg);
+      promptUnmute();
+      return;
+    } catch (e) {
+      lastErr = e;
+      setStatus('正在连接画面…', 'badge-idle');
+    }
+  }
+
+  fail('拿不到画面', String((lastErr && lastErr.message) || lastErr));
+}
+
+// promptUnmute 在这条路上补一次"点一下才有声音"。
+//
+// 正常进来的时候这一步由遮罩上的「开始观看」承担 —— 浏览器要求有用户操作
+// 才允许播放声音。而这条路是主机那边点出来的,用户自己那一下还没发生,
+// 不补的话画面回来了却没有声音,而页面上没有任何地方解释为什么。
+function promptUnmute() {
+  if (!els.video.muted) return;
+  els.overlay.hidden = false;
+  els.overlayMsg.textContent = '画面已接上';
+  els.overlayHint.textContent = '点「开始观看」把声音打开。';
+  els.startBtn.hidden = false;
+}
+
 function applyCtlState(s, reason) {
+  // 远控没开的时候收到控制权状态,只可能是一次被拒的旧申请(服务端会回
+  // "主机还没有开启远程控制")。那时候这一排按钮归 applyOpenUI 管,这里
+  // 别去动它们 —— 动了就会出现两个按钮都亮着。
+  if (!state.remoteEnabled) {
+    els.ctlInfo.textContent = reason || '';
+    return;
+  }
+
   switch (s) {
     case 'granted':
       setControlling(true);
@@ -443,6 +671,35 @@ function applyCtlState(s, reason) {
   }
 }
 
+// setHeld 处理"主机自己在用键鼠,注入让路"。
+//
+// 主机一碰键鼠,他那边的注入就停了(见 remotectl 的 injectLoop)。观众这边
+// 看到的是"我点什么都没反应"—— 不说明的话那是个彻头彻尾的谜,而且很容易
+// 被当成连接断了。停多久由主机那边定(他停下 1 秒就恢复),所以这里只做
+// 两件事:把状态说出来,以及把本地那份"按着"的记录清掉。
+function setHeld(on) {
+  if (state.held === on) return;
+  state.held = on;
+
+  if (on) {
+    // 主机那边已经把按着的东西补过抬起了(服务端 releaseHeld)。本地这份
+    // 记录跟着清掉,免得恢复之后补发一个多余的抬起 —— 那会松开主机刚刚
+    // 自己按下的东西。
+    releaseAllButtons();
+    releaseAllKeys();
+    if (state.controlling) {
+      setStatus('主机正在操作…', 'badge-warn');
+      els.ctlInfo.textContent = '主机正在操作,你的输入暂时不会生效';
+    }
+    return;
+  }
+
+  if (state.controlling) {
+    setStatus('控制中', 'badge-warn');
+    els.ctlInfo.textContent = '你正在控制这台电脑';
+  }
+}
+
 function setControlling(on) {
   if (state.controlling === on) return;
 
@@ -463,6 +720,10 @@ function setControlling(on) {
   }
 
   state.controlling = on;
+
+  // 控制权变了,让路的提示就作废了 —— 不管是刚拿到还是刚失去。
+  // 放在这一行**之后**:setHeld 要按新的值决定要不要动那行状态文字。
+  setHeld(false);
 
   els.video.classList.toggle('controlling', on);
   els.releaseBtn.hidden = !on;
@@ -488,7 +749,29 @@ els.ctlBtn.addEventListener('click', () => {
   // 对空密码一律不匹配(见 remotectl 的 passwordMatch),不会误放行。
   send({ t: 'ctl', act: 'request', pw: els.pwInput.value });
 });
-els.releaseBtn.addEventListener('click', () => send({ t: 'ctl', act: 'release' }));
+
+// 请求开启共享与远控。密码同样可以跳过主机批准 —— 和上面那个框是同一个
+// 暗号,主机端那边两条路共用一套校验(见 remotectl/open.go)。
+els.openBtn.addEventListener('click', () => {
+  // 立刻反映出去,不等服务端回话:这一下去的是网络请求,而按钮要马上
+  // 变成"取消请求",否则用户会以为没点上、再点一次。
+  state.openPending = true;
+  setStatus('等待主机同意…', 'badge-warn');
+  els.ctlInfo.textContent = '主机的屏幕上会出现同意提示,请稍候';
+  applyOpenUI();
+  send({ t: 'open', act: 'request', pw: els.pwInput.value });
+});
+
+els.releaseBtn.addEventListener('click', () => {
+  // 同一个按钮,两种处境:远控没开的时候撤的是"开启请求",开着的时候
+  // 归还的是控制权。服务端也是按消息类型分两条路走的,这里分错了就是
+  // "点了取消但什么都没发生"。
+  if (!state.remoteEnabled) {
+    send({ t: 'open', act: 'release' });
+    return;
+  }
+  send({ t: 'ctl', act: 'release' });
+});
 
 // ───────────────────────── 坐标映射 ─────────────────────────
 

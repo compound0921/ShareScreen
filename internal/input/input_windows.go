@@ -5,6 +5,7 @@ package input
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 
@@ -15,9 +16,95 @@ import (
 
 var (
 	user32            = windows.NewLazySystemDLL("user32.dll")
+	kernel32          = windows.NewLazySystemDLL("kernel32.dll")
 	procSendInput     = user32.NewProc("SendInput")
 	procGetForeground = user32.NewProc("GetForegroundWindow")
+
+	procGetLastInputInfo = user32.NewProc("GetLastInputInfo")
+	procGetTickCount     = kernel32.NewProc("GetTickCount")
 )
+
+// ---------- 判断主机自己在不在操作 ----------
+
+// lastInputInfo 对应 Win32 的 LASTINPUTINFO。
+//
+// dwTime 是**最后一次输入事件的 tick**(毫秒),用的是 GetTickCount 那口钟。
+// 注意它把注入的输入也算在内 —— SendInput 会重置这个空闲计时器,这正是
+// 下面要绕开的东西。
+type lastInputInfo struct {
+	cbSize uint32
+	dwTime uint32
+}
+
+// hostIdleAfterMillis 是"主机在操作"的判定窗口。
+//
+// 主机最后一次**不是我们发的**输入落在这个窗口之内,就认为他正在用这台
+// 机器,注入一律让路;超过这个窗口没动静才算空闲。1 秒是"手停下来了"和
+// "人只是停了一下"之间的折中。
+const hostIdleAfterMillis = 1000
+
+var (
+	// ourInjectTick 是我们最后一次成功注入的时刻。
+	ourInjectTick atomic.Uint32
+	// foreignInputTick 是最近一次**不是我们干的**输入的时刻。
+	foreignInputTick atomic.Uint32
+)
+
+func tick() uint32 {
+	t, _, _ := procGetTickCount.Call()
+	return uint32(t)
+}
+
+// sampleForeignInput 看一眼最近这次输入是不是我们干的,是别人就记下来。
+//
+// **必须在每次注入之前调**,理由见 HostActive 里那段。
+func sampleForeignInput() {
+	li := lastInputInfo{cbSize: uint32(unsafe.Sizeof(lastInputInfo{}))}
+	if ok, _, _ := procGetLastInputInfo.Call(uintptr(unsafe.Pointer(&li))); ok == 0 {
+		return // 拿不到当没有,宁可让注入继续也不要凭一个失败的去拦它
+	}
+
+	// 比我们上次注入还晚 → 中间有人动过,而那个人不可能是我们,只能是
+	// 本机用户。
+	//
+	// 相等时**不算**外来输入,而且这里要的正是"大于"这个方向:SendInput
+	// 记下的时刻和我们随后读到的 tick 之间可能差一毫秒(正好跨过 tick
+	// 边界),取大于才不会把自己的事件认成主机的。反过来漏判主机一次输入
+	// 的代价小得多 —— 他的手还在动,下一次采样照样抓得到。
+	if int32(li.dwTime-ourInjectTick.Load()) > 0 {
+		foreignInputTick.Store(li.dwTime)
+	}
+}
+
+// HostActive 报告本机用户此刻在不在操作这台机器。
+//
+// # 为什么要绕这么一圈
+//
+// GetLastInputInfo 报的是"本会话最后一次输入",而它**把注入的输入也算进去**
+// (SendInput 会重置那个空闲计时器)。直接拿它当"主人在不在"用,主机的鼠标
+// 只要被观众带着动过一下,就会永远显得"刚操作过" —— 而我们要的恰恰是分清
+// 哪次是观众发过来的、哪次是本机用户自己动的。
+//
+// 办法是搭上"我们知道自己什么时候注入过"这件事:在每次注入**之前**看一眼
+// GetLastInputInfo,那个时刻要是晚于我们上次注入的时刻,中间那次输入就
+// 只能是本机用户的。看早了没关系(下次注入前还会看),看晚了才会漏 ——
+// 所以是注入前看,不是注入后看。
+//
+// 从没注入过的时候(ourInjectTick 为 0),任何输入都算本机用户的,这也是对的:
+// 我们还没动过手,系统里那些输入没有别的来源。
+//
+// 拿不到信息时返回 false —— 宁可让注入继续,也不要凭一个失败的去拦它。
+func HostActive() bool {
+	sampleForeignInput()
+
+	last := foreignInputTick.Load()
+	if last == 0 {
+		return false // 还没观察到任何输入,当他没在操作
+	}
+	// 用有符号差值比大小:tick 是 32 位、约 49.7 天绕一圈,直接比大小会
+	// 在绕圈那一刻整整错一次。
+	return int32(tick()-last) < hostIdleAfterMillis
+}
 
 // INPUT 的事件类型。
 const (
@@ -115,6 +202,12 @@ func send(events []input) error {
 	if len(events) == 0 {
 		return nil
 	}
+
+	// 动手之前先看一眼有没有人来过。顺序不能反:发送之后再采样,刚发出去的
+	// 那批事件会把"最后一次输入"刷成我们自己的,主机夹在中间的操作就被
+	// 盖掉了。见 HostActive。
+	sampleForeignInput()
+
 	n, _, err := procSendInput.Call(
 		uintptr(len(events)),
 		uintptr(unsafe.Pointer(&events[0])),
@@ -124,6 +217,9 @@ func send(events []input) error {
 		return fmt.Errorf("注入 %d 个输入事件,系统只收下了 %d 个:%s",
 			len(events), n, lastErrorText(err))
 	}
+
+	// 记下我们动手的时刻:下一次采样时,晚于它的输入就不是我们发的了。
+	ourInjectTick.Store(tick())
 	return nil
 }
 

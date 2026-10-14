@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -242,8 +243,14 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 
 	// ── 远程控制 ──
 	//
-	// 默认不开启,也不监听任何端口。开启时才会绑 0.0.0.0 —— 这一步会
-	// 触发 Windows 防火墙的授权弹窗,所以它必须由用户主动点。
+	// 这里有两个开关,分的是"授权"和"监听"两件事(见 config 里那段):
+	// 远控授权默认**关**,而"请求开启"入口默认**开** —— 后者让远控端口
+	// 即使没开远控也一直绑着 0.0.0.0,好让远端那条链接敲得到门。
+	//
+	// 默认就绑 0.0.0.0 是有代价的,这一点在 config.RemoteControlConfig
+	// 上有完整的说明;这里只强调结果:默认配置下会触发一次 Windows 防火墙
+	// 的授权弹窗,而对外的门只有两层(256 位令牌 + 主机当场批准,或者
+	// 控制密码)。要收敛就关掉"请求入口"。
 	//
 	// CaptureRect 是现读的:采集源可能在控制页被改成窗口采集,那时候
 	// 屏幕坐标就对不上了,远控得跟着失效。
@@ -259,10 +266,26 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	// 而赋值就在它之前,顺序是安全的。和上面 applyHost 那层间接同一个道理。
 	popups := &popupController{ask: notify.Ask}
 
+	// approveOpen 落地"开启共享与远控"那两件事,而它在 server 层(要够着
+	// 推流管理器和远控配置),server 又在下面才建出来。先声明、后回填,
+	// 和上面 applyHost 是同一层间接。
+	var approveOpen func() remotectl.OpenResult
+
 	remote := remotectl.New(remotectl.Options{
 		WebRTCPort: cfg.WebRTCPort,
 		StreamPath: cfg.StreamPath,
 		LANHosts:   lanHosts(ip),
+
+		// 共享开没开由推流管理器说了算,远控这边只读它 —— 两边各记一份
+		// 必然走散,而远控页要靠它决定显示"请求开启"还是"申请控制"。
+		Sharing: func() bool { return manager.Status().Running },
+
+		OnApproveOpen: func() remotectl.OpenResult {
+			if approveOpen == nil {
+				return remotectl.OpenResult{Err: errors.New("服务还没准备好")}
+			}
+			return approveOpen()
+		},
 		// 显示器被系统转过(比如物理倒装的屏)时,ddagrab 采到的是倒的,
 		// 让观看页转回来。判断在 ffmpeg 包里,和别的采集源规则放一起。
 		//
@@ -270,7 +293,7 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		Rotate: func() int {
 			return ffmpeg.ViewerRotation(manager.Config().Video, screen.DisplayRotation())
 		},
-		Clipboard:  clipboard.New(),
+		Clipboard: clipboard.New(),
 		CaptureRect: func() (screen.Rect, bool) {
 			return ffmpeg.CaptureRect(manager.Config().Video)
 		},
@@ -400,18 +423,27 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	})
 
 	applyHost = srv.ApplyAutoPublicHost
+	approveOpen = srv.ApproveOpen
 	if cfg.AutoPortMap {
 		log.Printf("自动端口映射:已启用,正在查找路由器…")
 		mapper.SetEnabled(true)
 	}
 
-	// 上次退出时远控是开着的,这次接着开。
+	// 把远控相关的配置落到实际监听上。走的是控制页同一个入口
+	// (applyRemoteControl),所以顺带把令牌生成出来 —— 请求入口默认开,
+	// 也就是说第一次启动就会有令牌,链接当场就能发出去。
+	//
+	// 顺序:先请求入口(由它把端口绑上),再远控授权。反过来也行,只是
+	// 那样"开启远控"那一次要自己去绑端口。
 	//
 	// 失败不阻断启动:端口被占、采集源换成了窗口采集,都只意味着这一次
 	// 没开成,控制页上会显示原因。为了一个可选的对外功能起不来整个程序
 	// 是本末倒置。
+	if err := srv.SetRequestEntry(cfg.RemoteControl.RequestEntry); err != nil {
+		log.Printf("请求入口未能开启: %v", err)
+	}
 	if cfg.RemoteControl.Enabled {
-		if err := remote.SetEnabled(true); err != nil {
+		if err := srv.SetRemoteControlEnabled(true); err != nil {
 			log.Printf("远程控制未能开启: %v", err)
 		}
 	}
@@ -601,8 +633,14 @@ func joinTail(lines []string) string {
 // 这件事必须体现在这里,而不是只在浏览器页面上。
 func remoteStatusText(st remotectl.Status) string {
 	switch {
+	case !st.Enabled && st.RequestEntry:
+		// 远控没开,但门口挂着牌子 —— 别人能连上来说一句"开一下"。
+		// 这一句要说出来:它是主人判断"现在有没有人能敲到我"的唯一线索。
+		return "远控已关闭(请求入口开着)"
 	case !st.Enabled:
 		return "远程控制已关闭"
+	case st.Pending != nil && st.Pending.Kind == "open":
+		return "有人请求开启共享与远控,等你允许"
 	case st.Pending != nil:
 		return "有人申请控制,等你允许"
 	case st.Controller != "":

@@ -59,6 +59,22 @@ const (
 	ChoiceDeny
 )
 
+// Kind 是这份申请要主机同意的是什么。
+//
+// 只影响措辞,不影响按钮 —— 两种申请都只有"允许/拒绝"。
+type Kind int
+
+const (
+	// KindControl 是申请操作这台电脑(前提是远控已经开着)。
+	KindControl Kind = iota
+	// KindOpen 是请求开启共享与远控。
+	//
+	// 措辞必须把"同意之后会发生什么"说全:这一次批准同时决定了开始共享
+	// 和打开远控,而远端那边点一下就能一直走到"能看能控"。主机看到的是
+	// 唯一一次确认,不能只写"有人请求连接"。
+	KindOpen
+)
+
 // Request 是弹窗要显示的内容。
 type Request struct {
 	// IP 是申请方的地址,用于显示。remotectl 那边已经把端口去掉了。
@@ -67,6 +83,9 @@ type Request struct {
 	// Timeout 是这份申请还剩多久作废,用来生成提示语。
 	// 0 表示不显示剩余时间。
 	Timeout time.Duration
+
+	// Kind 决定标题和正文怎么措辞。
+	Kind Kind
 }
 
 // Prompt 是一次弹窗要显示的全部内容。
@@ -131,11 +150,23 @@ type Prompt struct {
 // 之后一直不动。
 func Describe(req Request) (title, body string) {
 	title = "有人申请控制这台电脑"
+	// "同意后会开始共享画面,并允许对方操作这台电脑" 这半句不能省。
+	//
+	// 这个功能把原来分开的两次确认(开共享 / 允许操作)合成了一次,所以
+	// 这一句话是主机唯一的知情来源 —— 他必须能从弹窗上就看出"点允许"
+	// 意味着屏幕会被共享出去,而对方能操作。按钮上的"允许"两个字不足以
+	// 承载这件事。
+	if req.Kind == KindOpen {
+		title = "有人请求开启共享与远控"
+	}
 
 	if req.IP == "" {
 		body = "对方没有留下地址。"
 	} else {
 		body = fmt.Sprintf("来自 %s。", req.IP)
+	}
+	if req.Kind == KindOpen {
+		body += "同意后会开始共享画面,并允许对方操作这台电脑。"
 	}
 	return title, body
 }

@@ -50,6 +50,7 @@ const els = {
 
   rcField: $('rcField'),
   rcEnabled: $('rcEnabled'),
+  rcRequestEntry: $('rcRequestEntry'),
   rcUnsupported: $('rcUnsupported'),
   rcPort: $('rcPort'),
   rcPassword: $('rcPassword'),
@@ -58,6 +59,7 @@ const els = {
   rcLinks: $('rcLinks'),
   rcLinkList: $('rcLinkList'),
   rcPending: $('rcPending'),
+  rcPendingTitle: $('rcPendingTitle'),
   rcPendingFrom: $('rcPendingFrom'),
   rcApprove: $('rcApprove'),
   rcDeny: $('rcDeny'),
@@ -614,9 +616,14 @@ function renderRemoteControl(st, supported) {
   els.rcField.hidden = false;
 
   const on = !!st.enabled;
+  // "请求入口"是另一个开关:它管的是端口监不监听,和"允许远程控制"管的是
+  // 两件事(见 config 里那段)。链接在**两者任一**开着的时候都可用。
+  const entry = !!st.requestEntry;
+  const listening = on || entry;
 
   // 正在输入的时候不回填,否则用户打到一半的数字会被冲掉
   if (document.activeElement !== els.rcEnabled) els.rcEnabled.checked = on;
+  if (document.activeElement !== els.rcRequestEntry) els.rcRequestEntry.checked = entry;
   if (document.activeElement !== els.rcPort) els.rcPort.value = st.port;
   // 密码同理。**这里尤其要紧**:密码是一串字符,被轮询冲掉的话用户
   // 会看着自己刚敲的东西一个个消失,而这种"打不进去"的框最难归因。
@@ -638,11 +645,20 @@ function renderRemoteControl(st, supported) {
   const pending = st.pending;
   els.rcPending.hidden = !pending;
   if (pending) {
-    els.rcPendingFrom.textContent =
-      `来自 ${pending.remoteIp} 的申请,一分钟内不答复就自动作废。`;
+    // 两种申请的措辞必须分开。开启请求那一次批准同时决定"开始共享"和
+    // "允许操作",这两件事都不是能从"允许"两个字推出来的 —— 而这是
+    // 主机唯一的知情来源。
+    const isOpen = pending.kind === 'open';
+    els.rcPendingTitle.textContent = isOpen
+      ? '有人请求开启共享与远控'
+      : '有人申请控制这台电脑';
+    els.rcPendingFrom.textContent = isOpen
+      ? `来自 ${pending.remoteIp}。同意后会开始共享你的屏幕,并允许对方操作这台电脑。` +
+        '一分钟内不答复就自动作废。'
+      : `来自 ${pending.remoteIp} 的申请,一分钟内不答复就自动作废。`;
     els.rcApprove.dataset.id = pending.id;
     els.rcDeny.dataset.id = pending.id;
-    document.title = '⚠ 有人申请控制 — ShareScreen';
+    document.title = (isOpen ? '⚠ 有人请求开启 — ' : '⚠ 有人申请控制 — ') + 'ShareScreen';
   } else {
     document.title = 'ShareScreen';
   }
@@ -656,11 +672,14 @@ function renderRemoteControl(st, supported) {
   els.rcElevated.hidden = !(controlling && st.elevated);
 
   // 链接:只在凭据或端口变了的时候重新拉一次
-  els.rcLinks.hidden = !on;
-  const key = on ? `${st.token}|${st.port}` : '';
+  //
+  // 可见性跟的是"端口在不在监听",不是"远控开没开":请求入口开着的时候
+  // 链接照样有效 —— 那条链接本来就是给"远控还没开"这个场景用的。
+  els.rcLinks.hidden = !listening;
+  const key = listening ? `${st.token}|${st.port}` : '';
   if (key !== rcLinkKey) {
     rcLinkKey = key;
-    if (on) loadRCLinks();
+    if (listening) loadRCLinks();
   }
 }
 
@@ -716,6 +735,10 @@ function renderRCLinks(links) {
 function initRemoteControl() {
   els.rcEnabled.addEventListener('change', () => {
     rcPost('/api/rc/enable', { enabled: els.rcEnabled.checked });
+  });
+
+  els.rcRequestEntry.addEventListener('change', () => {
+    rcPost('/api/rc/enable', { requestEntry: els.rcRequestEntry.checked });
   });
 
   // 用 change 而不是 input:端口是边打边变的,每敲一个数字就重开一次

@@ -35,6 +35,9 @@
   <input id="pwInput" type="password" placeholder="控制密码" spellcheck="false"
          autocomplete="off" hidden>
   <button id="ctlBtn" class="primary" hidden>申请控制</button>
+  <!-- 远控还没开的时候,这里换成"请求开启共享与远控"。两个按钮互斥:
+       远控开着就不会有请求开启,反过来也一样(见 rc.js 的 applyOpenUI)。 -->
+  <button id="openBtn" class="primary" hidden>请求开启共享与远控</button>
   <button id="releaseBtn" class="ghost" hidden>归还控制</button>
   <span id="ctlInfo" class="muted"></span>
   <span class="rc-spacer"></span>

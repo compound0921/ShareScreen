@@ -42,6 +42,9 @@ type PortMapper interface {
 // 监听端口的服务。
 type RemoteController interface {
 	SetEnabled(on bool) error
+	// SetRequestEntry 开/关那个常驻的"请求开启"入口。它和 SetEnabled 是
+	// 两件事:前者管端口要不要一直听着,后者管能不能操作(见 remotectl 包注释)。
+	SetRequestEntry(on bool) error
 	Configure(port int, token, password string, allowClipboard bool)
 	Status() remotectl.Status
 	Approve(id string) bool

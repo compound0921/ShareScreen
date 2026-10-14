@@ -26,9 +26,10 @@ type popupController struct {
 	deny    func(string) bool
 	status  func() remotectl.Status
 
-	mu     sync.Mutex
-	curID  string             // 正在弹窗的申请 ID;"" 表示没有弹窗
-	cancel context.CancelFunc // 关掉当前弹窗
+	mu      sync.Mutex
+	curID   string             // 正在弹窗的申请 ID;"" 表示没有弹窗
+	curKind string             // 那份申请的种类 —— 决定弹窗上的措辞
+	cancel  context.CancelFunc // 关掉当前弹窗
 }
 
 // onChange 是唯一入口,由 remotectl.Options.OnChange 驱动。
@@ -38,13 +39,14 @@ type popupController struct {
 // 会把那条连接和过期检查一起卡住。所以真正的等待在 run() 里那个
 // 独立的 goroutine 上。
 func (p *popupController) onChange(st remotectl.Status) {
-	id, ip := "", ""
+	id, ip, kind := "", "", ""
 	var timeout time.Duration
 	if st.Pending != nil {
 		id, ip = st.Pending.ID, st.Pending.RemoteIP
+		kind = st.Pending.Kind
 		timeout = remaining(st.Pending.At)
 	}
-	p.sync(id, ip, timeout)
+	p.sync(id, ip, kind, timeout)
 }
 
 // remaining 算这份申请还剩多久作废。
@@ -64,7 +66,7 @@ func remaining(at string) time.Duration {
 	return left
 }
 
-func (p *popupController) sync(id, ip string, timeout time.Duration) {
+func (p *popupController) sync(id, ip, kind string, timeout time.Duration) {
 	// 陈旧回调防护。OnChange 没有全局串行化 —— 两条 readPump 协程加一个
 	// 过期定时器都可能调它,而且都是各自先取一份 Status 再进来。所以手里
 	// 这个 st 未必是最新的,动手之前先问一次权威状态。
@@ -78,21 +80,24 @@ func (p *popupController) sync(id, ip string, timeout time.Duration) {
 	// Status() 可以从 OnChange 里安全调用。哪天有人在 s.mu 里调 notify,
 	// 这里会立刻自死锁(Go 的 mutex 不可重入)—— 改那边的时候记得看这里。
 	if p.status != nil {
-		if cur := p.status().Pending; pendingID(cur) != id {
+		// 种类也要一起比:同一个会话的申请**理论上**不会在挂着的期间换种类,
+		// 但"理论上"不是理由 —— 万一换了,弹窗上留着的就是上一句话,而主机
+		// 会照着那句已经不对的话去点允许。
+		if cur := p.status().Pending; pendingID(cur) != id || pendingKind(cur) != kind {
 			return
 		}
 	}
 
 	p.mu.Lock()
 
-	if id == p.curID {
+	if id == p.curID && kind == p.curKind {
 		// 同一份申请。绝大多数回调都是这种(批准之后还会有一串)。
 		p.mu.Unlock()
 		return
 	}
 
 	prev := p.cancel
-	p.cancel, p.curID = nil, id
+	p.cancel, p.curID, p.curKind = nil, id, kind
 
 	if id == "" || p.ask == nil {
 		p.mu.Unlock()
@@ -109,12 +114,12 @@ func (p *popupController) sync(id, ip string, timeout time.Duration) {
 	if prev != nil {
 		prev()
 	}
-	go p.run(ctx, id, ip, timeout)
+	go p.run(ctx, id, ip, kind, timeout)
 }
 
 // run 等用户做决定,然后把它交回去。
-func (p *popupController) run(ctx context.Context, id, ip string, timeout time.Duration) {
-	choice := p.ask(ctx, notify.Request{IP: ip, Timeout: timeout})
+func (p *popupController) run(ctx context.Context, id, ip, kind string, timeout time.Duration) {
+	choice := p.ask(ctx, notify.Request{IP: ip, Timeout: timeout, Kind: popupKind(kind)})
 
 	switch choice {
 	case notify.ChoiceAllow:
@@ -131,8 +136,8 @@ func (p *popupController) run(ctx context.Context, id, ip string, timeout time.D
 	// 要比一下:如果等待期间这份申请已经作废、又来了新的一份,curID 早就
 	// 换成新的了,这里不能把后来者的记录抹掉。
 	p.mu.Lock()
-	if p.curID == id {
-		p.curID = ""
+	if p.curID == id && p.curKind == kind {
+		p.curID, p.curKind = "", ""
 	}
 	p.mu.Unlock()
 }
@@ -142,4 +147,22 @@ func pendingID(p *remotectl.Pending) string {
 		return ""
 	}
 	return p.ID
+}
+
+func pendingKind(p *remotectl.Pending) string {
+	if p == nil {
+		return ""
+	}
+	return p.Kind
+}
+
+// popupKind 把协议里的种类翻成弹窗的种类。
+//
+// 不认识的种类一律当成控制申请:那是改动之前唯一的种类,也是措辞最保守的
+// 那一种(只提"控制",不提"共享出去")。
+func popupKind(kind string) notify.Kind {
+	if kind == "open" {
+		return notify.KindOpen
+	}
+	return notify.KindControl
 }
