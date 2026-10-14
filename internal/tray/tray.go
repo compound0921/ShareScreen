@@ -5,6 +5,7 @@
 package tray
 
 import (
+	"runtime"
 	"time"
 
 	"github.com/energye/systray"
@@ -54,6 +55,23 @@ const menuSyncInterval = 2 * time.Second
 //
 // 会阻塞,应在独立的 goroutine 里调用。
 func Run(a Actions) {
+	// 消息循环必须钉死在一条 OS 线程上。
+	//
+	// Win32 的窗口队列是**按线程**的:窗口在哪条线程上建,发给它的消息就排
+	// 在哪条线程的队列里,也只有那条线程的 GetMessage 取得走。而 systray 的
+	// 消息循环跑在调用 Run 的这条普通 goroutine 上,它自己在 init 里那次
+	// runtime.LockOSThread 锁的是 main 那条,跟我们不是同一条 —— 也就是说
+	// 这里**没有**被锁住。
+	//
+	// 没锁住就出事:GetMessage 是长阻塞调用,goroutine 交还 P 之后可能被调度
+	// 到另一条线程上继续跑,从此窗口的消息没人取,图标就不再响应了。右键
+	// 打不开菜单是它的表现之一,而且一旦发生就一直是坏的 —— 不是每次都不好,
+	// 是"哪一次开始就再也不好"。
+	//
+	// 消息循环结束就解锁:那条线程上的窗口已经销毁了,没必要再占着它。
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	// 所有设置都必须在 onReady 回调里做。
 	// 在 systray.Run 之前调用 SetIcon / SetTooltip 会报
 	// "tray not ready yet" 并被静默丢弃 —— 图标不会出现。
@@ -68,6 +86,22 @@ func Run(a Actions) {
 			if a.OpenControl != nil {
 				a.OpenControl()
 			}
+		})
+
+		// 右键弹菜单。
+		//
+		// 不直接用 systray 的默认右键行为,而是自己接过来:默认那条路径在
+		// ShowMenu 里就结束了,而我们必须在菜单收起**之后**再补一条消息,
+		// 否则下一次右键会打不开。原因写在 afterMenuClosed 上。
+		//
+		// 设了回调之后菜单不会自动弹,得自己调 ShowMenu —— 这点不能漏,
+		// 漏了右键就彻底没反应了。
+		systray.SetOnRClick(func(m systray.IMenu) {
+			// 会阻塞到菜单收起。返回值只表示"这次没选中任何一项"(点空白
+			// 关掉就是 0),属于正常情况,不用管 —— 补消息这一步两种情况
+			// 都要做。
+			_ = m.ShowMenu()
+			afterMenuClosed()
 		})
 
 		mOpen := systray.AddMenuItem("打开控制页", "在浏览器中打开控制页")
