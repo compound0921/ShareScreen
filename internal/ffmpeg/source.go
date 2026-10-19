@@ -338,23 +338,28 @@ func pixFmtArgs(v config.VideoConfig, enc Encoder, srcW, srcH int) []string {
 // 并给一句用户能照做的提示。空串表示不是已知的采集层错误。
 //
 // 实测(T2 真机诊断,2026-10-19,混合显卡笔记本):
-//   - ddagrab 默认用 DXGI 适配器 0,那里是 NVIDIA,但显示器由 Intel 核显驱动;
-//     DuplicateOutput 返回 DXGI_ERROR_UNSUPPORTED,ffmpeg 只报
+//   - ddagrab 默认用 DXGI 适配器 0(NVIDIA),但 nvidia-smi 报
+//     Display Active: Disabled;DXGI 把唯一活动输出报在它名下,
+//     DuplicateOutput1 返回 DXGI_ERROR_UNSUPPORTED,ffmpeg 报
 //     "Selected output not supported";
-//   - 强制指定 Intel 适配器后变成 "Failed to enumerate DXGI output";
-//   - 机器上常驻向日葵 IDD 和 MuMu 虚拟显示适配器,桌面很可能实际由虚拟
-//     显示器承载 —— 这时两块物理 GPU 都枚举不到可复制的输出。
+//   - 绑定到真正驱动桌面的 Intel 后,Intel 在 DXGI 里枚举不到输出,
+//     报 "Failed to enumerate DXGI output";
+//   - 禁用向日葵 IDD / MuMu 虚拟显示适配器后错误逐字不变 —— 与虚拟显示
+//     无关,是 DXGI 的输出归属和显示适配器错位。
 //
 // 原始报错只说"输出不支持",用户不知道该换采集方式还是该动驱动,所以
 // 这里把下一步写清楚。不自动回退采集源:配置、界面和远控坐标都按当前
 // 采集源算,静默换源会让三者对不上(取舍见 AGENTS.md §10 的 T2)。
 func DDAGrabFailureHint(tail string) string {
 	switch {
-	case strings.Contains(tail, "Selected output not supported"),
-		strings.Contains(tail, "Failed to enumerate DXGI output"):
-		return "这台机器的桌面可能由核显或虚拟显示器承载,GPU 采集找不到可复制的输出。" +
-			"请改用「屏幕(兼容模式)」;如果装了向日葵、MuMu、Parsec 等虚拟显示驱动," +
-			"也可以在设备管理器里禁用它们再试。"
+	case strings.Contains(tail, "Selected output not supported"):
+		return "当前显卡上的输出没有被桌面合成使用(DXGI 输出归属与显示器不一致)。" +
+			"请改用「屏幕(兼容模式)」;也可以在显卡控制面板里切换「独显直连」" +
+			"或更新显卡驱动后重试。"
+	case strings.Contains(tail, "Failed to enumerate DXGI output"):
+		return "显示器所在的显卡在 DXGI 里枚举不到可复制的输出(混合显卡拓扑错位)。" +
+			"请改用「屏幕(兼容模式)」;也可以在显卡控制面板里切换「独显直连」" +
+			"或更新核显驱动后重试。"
 	}
 	return ""
 }

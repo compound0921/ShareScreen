@@ -310,16 +310,20 @@ ICE 媒体 **8189/udp**、RTMP 推流入口 **1935**、SRT 推流入口 **8890**
   `filterArgs` 里补 `hwdownload,format=bgra`(要缩放再接 `scale`),见
   `internal/ffmpeg/source.go`、`args.go`。回归用例在
   `internal/ffmpeg/args_test.go` 的 `TestFilterArgsZeroCopy`。
-- **采集层根因(2026-10-19 真机诊断,待最终验证):** 一台 Lenovo 混合显卡笔记本上
-  ddagrab 连输入都打不开,报 `Selected output not supported`(DXGI `DuplicateOutput`
-  返回 `DXGI_ERROR_UNSUPPORTED`)。实测:`dx:0` 是 NVIDIA(不驱动显示器),`dx:1` 是
-  Intel(驱动 1920×1200),但强制 Intel 后报 `Failed to enumerate DXGI output`;
-  机器上常驻向日葵 IDD 与 MuMu 虚拟显示适配器,推断桌面实际由虚拟显示器承载。
-  决定性验证:在设备管理器禁用这两块虚拟显示适配器后重跑采集实验。
+- **采集层根因(2026-10-19 第二轮诊断,已确认):** 一台 Lenovo 混合显卡笔记本上
+  ddagrab 连输入都打不开。真因是 **DXGI 输出归属与显示适配器错位**:
+  - `nvidia-smi`:`Display Attached: No`、`Display Active: Disabled`;
+  - WMI / `EnumDisplayDevices`:桌面在 Intel(1920×1200)上;
+  - DXGI:唯一 `attached=1` 的输出却挂在 NVIDIA 名下,Intel 侧枚举到 **0 个输出**。
+  设备建在 NVIDIA 上,`IDXGIOutput5::DuplicateOutput1` 返回
+  `DXGI_ERROR_UNSUPPORTED`;建在 Intel 上又枚举不到输出 —— 两条路都堵死。
+  **虚拟显示驱动已被排除**:禁用向日葵 IDD 与 MuMu 后错误逐字不变。
+  这台机器上没有任何 ddagrab 参数能修好;外部可尝试独显直连/更新核显驱动,
+  产品侧真正解法是 WGC(不依赖输出归属,见架构设计 §11)。
 - **采集层处理(2026-10-19):**
   - **不自动回退采集源**(配置、界面和远控坐标都按当前采集源算,静默换源会让
     三者对不上)。在 `internal/stream` 识别上述两条报错,错误信息里追加可操作提示
-    ("改用兼容模式 / 禁用虚拟显示驱动"),见 `ffmpeg.DDAGrabFailureHint`。
+    ("改用兼容模式 / 切独显直连或更新驱动"),见 `ffmpeg.DDAGrabFailureHint`。
   - **适配器绑定:** `CaptureOpts.DDAGrabVendor` 非 `Unknown` 时,GPU 采集改成
     `-init_hw_device d3d11va=dx:,vendor_id=... -filter_hw_device dx` +
     `-filter_complex "ddagrab=...[v]" -map "[v]"`,由 Manager 传入
@@ -327,10 +331,11 @@ ICE 媒体 **8189/udp**、RTMP 推流入口 **1935**、SRT 推流入口 **8890**
     不接显示器的独显)。实测本机(NVIDIA 显示器)零拷贝与 hwdownload 两条路径都能出帧。
   - 注意逗号:`dx:,vendor_id=0x10de`;写成 `dx:vendor_id=...` 会被当成适配器下标,
     静默忽略 vendor_id。
-- **剩余风险:** 三台设备各自的确切驱动组合未知;虚拟显示驱动只是当前证据最强的解释。
-  绑定适配器解决的是"选错卡",如果显示适配器本身枚举不到输出(诊断那台 Intel 报
-  `Failed to enumerate DXGI output`),仍然无解,需先验证虚拟显示驱动。
+- **剩余风险:** 另外两台设备尚未执行第二轮验证(本轮只能接入一台)。绑定适配器
+  解决的是"选错卡";像诊断机这种"显示适配器没有可复制输出"的 DXGI 拓扑错位,
+  绑定也救不了 —— 需要 WGC 或外部显卡模式/驱动调整。
 - **验收:** GPU 采集至少能在一台混合显卡设备上正常共享;采集层不支持的机器
   给出明确、可操作的提示(不自动回退),而不是只显示 ffmpeg 原文。
-- **状态:** 编码层已修;采集层已加适配器绑定与可操作提示。**T2 未关闭** —— 等待在
-  三台设备上用新构建复测,以及禁用虚拟显示驱动后的验证结果。
+- **状态:** 编码层已修;采集层已加适配器绑定与精确提示;诊断机已确认 ddagrab
+  在该拓扑下不可用(与虚拟显示无关)。**T2 未关闭** —— 另外两台待测;若要覆盖
+  诊断机这类机器,需要评估 WGC 采集。

@@ -341,7 +341,7 @@ CPU 占用(任务管理器,ffmpeg 进程):  ⬜ 待确认
 |---|---|---|
 | `Cannot load nvcuda.dll` | N 卡驱动未装或过旧 | 更新显卡驱动,或换 `h264_qsv` / `libx264` |
 | `Error opening input ... gdigrab` | 桌面捕获被拒 | 确认不是运行在无桌面会话(RDP 断开会话可能失败) |
-| `Selected output not supported` / `Failed to enumerate DXGI output` | ddagrab 所在适配器上没有可复制的桌面输出(DXGI `DXGI_ERROR_UNSUPPORTED`) | 混合显卡/虚拟显示环境常见:改用兼容模式,或禁用向日葵 IDD、MuMu、Parsec 等虚拟显示适配器后重试(详见架构设计 §5.1) |
+| `Selected output not supported` / `Failed to enumerate DXGI output` | DXGI 输出归属与显示适配器错位,ddagrab 没有可复制的桌面输出 | 改用兼容模式;或切换独显直连/更新显卡驱动(实测与虚拟显示驱动无关,禁用 IDD 无效;详见架构设计 §5.1) |
 | `speed=0.3x` 之类远低于 1 | 编码器跟不上 / CPU 满载 | 换硬件编码器;降低分辨率或帧率 |
 | 画面尺寸不对 | 高 DPI 缩放 | 用 `-vf scale=1280:720` 强制输出尺寸 |
 | 抓到的是黑屏 | 多显示器 / 会话问题 | 试试 `-i desktop` 换成指定区域:`-i "desktop"` 配合 `-offset_x` 等参数 |
