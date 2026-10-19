@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"sharescreen/internal/config"
+	"sharescreen/internal/gpu"
 	"sharescreen/internal/screen"
 )
 
@@ -24,6 +25,16 @@ type CaptureOpts struct {
 	// 在拖东西。关掉之后指针改由控制端自己画(浏览器原生光标,零延迟)。
 	// 见 docs/架构设计.md §12.11。
 	DrawMouse bool
+
+	// DDAGrabVendor 是驱动主显示器那块显卡的厂商。非 Unknown 时,GPU 采集
+	// 会显式让 ffmpeg 用这块适配器(vendor_id=...),而不是听凭 ddagrab
+	// 默认选适配器 0。
+	//
+	// 这是实测踩出来的:混合显卡笔记本上 DXGI 适配器 0 常常是不接显示器的
+	// NVIDIA,显示器在 Intel 上;ddagrab 默认用 0,DuplicateOutput 直接返回
+	// DXGI_ERROR_UNSUPPORTED(ffmpeg 报 "Selected output not supported")。
+	// 见 docs/架构设计.md §5.1。
+	DDAGrabVendor gpu.Vendor
 }
 
 // CaptureOptsFor 由"采集源 + 远控是否开启"推出采集行为开关。
@@ -64,23 +75,44 @@ func ViewerRotation(v config.VideoConfig, displayRotation int) int {
 	return 0
 }
 
+// inputSpec 是采集段的构造结果。
+type inputSpec struct {
+	// args 是输入选项和 -i。graph 非空时里面只有 -init_hw_device 之类的
+	// 全局选项,没有视频 -i。
+	args []string
+
+	// graph 非空表示视频源来自 -filter_complex,值形如
+	// "ddagrab=framerate=60[v]"。给 ddagrab 指定适配器时必须走这条:
+	// -filter_hw_device 对 lavfi 的 -i 输入无效(实测,见架构设计 §5.1)。
+	graph string
+}
+
 // inputArgs 返回采集源的输入段参数。
-func inputArgs(v config.VideoConfig, o CaptureOpts) ([]string, error) {
+func inputArgs(v config.VideoConfig, o CaptureOpts, enc Encoder, srcW, srcH int) (inputSpec, error) {
 	fps := fmt.Sprintf("%d", v.FPS)
 
 	switch v.Source {
 	case config.SourceScreenDDAGrab:
-		// ddagrab 是 lavfi 源滤镜,不是设备。
-		// 它输出 d3d11 硬件帧,可直接零拷贝进 NVENC。
+		// 知道显示器挂在哪块卡上时,显式指定适配器。ddagrab 自己默认用
+		// 适配器 0,混合显卡机器上那常常是不接显示器的独显。
+		if o.DDAGrabVendor != gpu.VendorUnknown {
+			return inputSpec{
+				args: []string{
+					"-init_hw_device", "d3d11va=dx:,vendor_id=" + vendorID(o.DDAGrabVendor),
+					"-filter_hw_device", "dx",
+				},
+				graph: ddagrabGraph(v, o, enc, srcW, srcH),
+			}, nil
+		}
+
+		// 不知道厂商时保持原来的 lavfi 路径。
+		// ddagrab 是 lavfi 源滤镜,不是设备。它输出 d3d11 硬件帧,
+		// 可直接零拷贝进 NVENC。
 		//
 		// 不画光标也仍然维持帧率:ddagrab 的 dup_frames 默认为 true
 		// (画面没更新时重复上一帧),外面还有 -fps_mode cfr 兜底。
 		// 附带好处是纯指针移动时画面不变,那些重复帧几乎不占码率。
-		f := fmt.Sprintf("ddagrab=framerate=%d", v.FPS)
-		if !o.DrawMouse {
-			f += ":draw_mouse=0"
-		}
-		return []string{"-f", "lavfi", "-i", f}, nil
+		return inputSpec{args: []string{"-f", "lavfi", "-i", ddagrabInput(v, o)}}, nil
 
 	case config.SourceScreenGDI:
 		args := []string{"-f", "gdigrab", "-framerate", fps}
@@ -88,7 +120,7 @@ func inputArgs(v config.VideoConfig, o CaptureOpts) ([]string, error) {
 			// 必须是 -i 之前的输入选项 —— 它不是滤镜,放进 -vf 会被拒绝。
 			args = append(args, "-draw_mouse", "0")
 		}
-		return append(args, "-i", "desktop"), nil
+		return inputSpec{args: append(args, "-i", "desktop")}, nil
 
 	// 下面两种源**不理会** o.DrawMouse,光标一律画。
 	//
@@ -97,25 +129,80 @@ func inputArgs(v config.VideoConfig, o CaptureOpts) ([]string, error) {
 	// 必定为 true。真收到 false 只可能是调用方绕过了 CaptureOptsFor。
 	case config.SourceWindow:
 		if v.WindowTitle == "" {
-			return nil, fmt.Errorf("窗口采集需要填写窗口标题")
+			return inputSpec{}, fmt.Errorf("窗口采集需要填写窗口标题")
 		}
 		// title= 匹配标题中包含该字符串的窗口。
 		// 中文标题能正确传递 —— 我们走 exec.Command 的参数切片,不经过 shell。
-		return []string{
+		return inputSpec{args: []string{
 			"-f", "gdigrab",
 			"-framerate", fps,
 			"-i", "title=" + v.WindowTitle,
-		}, nil
+		}}, nil
 
 	case config.SourceOBS:
-		return []string{
+		return inputSpec{args: []string{
 			"-f", "dshow",
 			"-framerate", fps,
 			"-i", "video=" + obsDeviceName,
-		}, nil
+		}}, nil
 	}
 
-	return nil, fmt.Errorf("未知采集源: %s", v.Source)
+	return inputSpec{}, fmt.Errorf("未知采集源: %s", v.Source)
+}
+
+// ddagrabInput 返回 ddagrab 的滤镜串(不含输出标签)。
+func ddagrabInput(v config.VideoConfig, o CaptureOpts) string {
+	f := fmt.Sprintf("ddagrab=framerate=%d", v.FPS)
+	if !o.DrawMouse {
+		f += ":draw_mouse=0"
+	}
+	return f
+}
+
+// ddagrabGraph 返回 filter_complex 形式的视频图(带 [v] 标签)。
+func ddagrabGraph(v config.VideoConfig, o CaptureOpts, enc Encoder, srcW, srcH int) string {
+	f := ddagrabInput(v, o)
+	if extra := ddagrabFilters(v, enc, srcW, srcH); extra != "" {
+		f += "," + extra
+	}
+	return f + "[v]"
+}
+
+// ddagrabFilters 返回 ddagrab 输出之后需要接的滤镜串(不含 ddagrab 本身)。
+//
+// 零拷贝时不产生任何滤镜;否则下载回内存,需要缩放再接 scale。
+func ddagrabFilters(v config.VideoConfig, enc Encoder, srcW, srcH int) string {
+	var f string
+	if !isZeroCopy(v, enc, srcW, srcH) {
+		f = "hwdownload,format=bgra"
+	}
+	if needsScaling(v, srcW, srcH) {
+		if f != "" {
+			f += ","
+		}
+		f += fmt.Sprintf("scale=%d:%d", v.Width, v.Height)
+	}
+	return f
+}
+
+// vendorID 返回显卡厂商在 PCI 配置空间里的 Vendor ID。
+//
+// ffmpeg 的 d3d11va 设备按它选适配器:
+//
+//	-init_hw_device d3d11va=dx:,vendor_id=0x10de
+//
+// 注意逗号:写成 dx:vendor_id=... 会被当成适配器下标,静默忽略 vendor_id
+// (实测两种写法在日志里的差异只有 "Selecting d3d11va adapter N")。
+func vendorID(v gpu.Vendor) string {
+	switch v {
+	case gpu.VendorNVIDIA:
+		return "0x10de"
+	case gpu.VendorIntel:
+		return "0x8086"
+	case gpu.VendorAMD:
+		return "0x1002"
+	}
+	return ""
 }
 
 // SupportsRemote 报告这个采集源能不能做远程控制。
@@ -221,12 +308,11 @@ func isZeroCopy(v config.VideoConfig, enc Encoder, srcW, srcH int) bool {
 //     代价是每个全屏帧多一次 CPU 拷贝(2K 分辨率下约 16 MB/帧)。
 //  3. 非 ddagrab 的源本来就是内存帧,普通 scale 即可。
 func filterArgs(v config.VideoConfig, enc Encoder, srcW, srcH int) []string {
-	if v.Source == config.SourceScreenDDAGrab && !isZeroCopy(v, enc, srcW, srcH) {
-		f := "hwdownload,format=bgra"
-		if needsScaling(v, srcW, srcH) {
-			f += fmt.Sprintf(",scale=%d:%d", v.Width, v.Height)
+	if v.Source == config.SourceScreenDDAGrab {
+		if f := ddagrabFilters(v, enc, srcW, srcH); f != "" {
+			return []string{"-vf", f}
 		}
-		return []string{"-vf", f}
+		return nil
 	}
 
 	if !needsScaling(v, srcW, srcH) {

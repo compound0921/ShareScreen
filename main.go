@@ -175,6 +175,13 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		// 会在"远控开关"这一项上和实际跑的不一致 —— 而排查时正是
 		// 要靠这条命令去对。
 		opts := ffmpeg.CaptureOptsFor(cfg.Video, cfg.RemoteControl.Enabled)
+		// 和 manager.startOnce 保持一致:GPU 采集显式绑定显示器所在适配器;
+		// DXGI 里没有这块卡时退回不绑定的旧路径。
+		opts.DDAGrabVendor = adapterVendor
+		if cfg.Video.Source == config.SourceScreenDDAGrab &&
+			opts.DDAGrabVendor != gpu.VendorUnknown && !ffmpeg.DDAGrabVendorUsable(ffmpegTool.Exe, opts.DDAGrabVendor) {
+			opts.DDAGrabVendor = gpu.VendorUnknown
+		}
 		args, err := ffmpeg.BuildArgs(cfg.Video, opts, audioIn, enc, target, desktopW, desktopH)
 		if err != nil {
 			return err

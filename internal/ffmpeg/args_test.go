@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"sharescreen/internal/config"
+	"sharescreen/internal/gpu"
 )
 
 // indexOf 返回 tok 在 args 里的下标,没有则 -1。
@@ -87,10 +88,11 @@ func TestInputArgsDrawMouse(t *testing.T) {
 			if tc.src == config.SourceWindow {
 				v.WindowTitle = "记事本"
 			}
-			args, err := inputArgs(v, CaptureOpts{DrawMouse: tc.draw})
+			spec, err := inputArgs(v, CaptureOpts{DrawMouse: tc.draw}, Encoder{Kind: "nvenc"}, 0, 0)
 			if err != nil {
 				t.Fatalf("inputArgs 报错:%v", err)
 			}
+			args := spec.args
 
 			if tc.wantIn != "" {
 				if got := valueOf(t, args, "-i"); got != tc.wantIn {
@@ -282,6 +284,103 @@ func TestFilterArgsZeroCopy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildArgsDDAGrabVendor 钉住"GPU 采集显式绑定显示器所在适配器"。
+//
+// 这条路是 T2 采集层的修法:混合显卡笔记本上 ddagrab 默认用 DXGI 适配器 0,
+// 那常常是不接显示器的 NVIDIA,DuplicateOutput 直接返回 DXGI_ERROR_UNSUPPORTED。
+// 指定适配器必须走 -filter_complex —— -filter_hw_device 对 lavfi 的 -i 无效。
+func TestBuildArgsDDAGrabVendor(t *testing.T) {
+	nvenc := Encoder{Name: "h264_nvenc", Kind: "nvenc", Hardware: true}
+	qsv := Encoder{Name: "h264_qsv", Kind: "qsv", Hardware: true}
+	v := config.VideoConfig{Source: config.SourceScreenDDAGrab, FPS: 60, Width: 2560, Height: 1600}
+
+	t.Run("NVIDIA + NVENC + 不缩放:零拷贝,图里不下载", func(t *testing.T) {
+		opts := CaptureOpts{DrawMouse: true, DDAGrabVendor: gpu.VendorNVIDIA}
+		args, err := BuildArgs(v, opts, nil, nvenc, "rtsp://127.0.0.1:8554/live", 2560, 1600)
+		if err != nil {
+			t.Fatalf("BuildArgs 报错:%v", err)
+		}
+		if got := valueOf(t, args, "-init_hw_device"); got != "d3d11va=dx:,vendor_id=0x10de" {
+			t.Errorf("-init_hw_device = %q", got)
+		}
+		if got := valueOf(t, args, "-filter_complex"); got != "ddagrab=framerate=60[v]" {
+			t.Errorf("-filter_complex = %q,想要零拷贝图", got)
+		}
+		if got := valueOf(t, args, "-map"); got != "[v]" {
+			t.Errorf("-map = %q,想要 [v]", got)
+		}
+		if indexOf(args, "-vf") >= 0 {
+			t.Errorf("filter_complex 路径不该再出 -vf:%v", args)
+		}
+		if indexOf(args, "-i") >= 0 {
+			t.Errorf("filter_complex 路径不该有视频 -i:%v", args)
+		}
+	})
+
+	t.Run("Intel + QSV + 不缩放:图里必须下载回内存", func(t *testing.T) {
+		opts := CaptureOpts{DrawMouse: true, DDAGrabVendor: gpu.VendorIntel}
+		args, err := BuildArgs(v, opts, nil, qsv, "rtsp://127.0.0.1:8554/live", 2560, 1600)
+		if err != nil {
+			t.Fatalf("BuildArgs 报错:%v", err)
+		}
+		if got := valueOf(t, args, "-init_hw_device"); got != "d3d11va=dx:,vendor_id=0x8086" {
+			t.Errorf("-init_hw_device = %q", got)
+		}
+		if got := valueOf(t, args, "-filter_complex"); got != "ddagrab=framerate=60,hwdownload,format=bgra[v]" {
+			t.Errorf("-filter_complex = %q,想要带 hwdownload", got)
+		}
+	})
+
+	t.Run("缩放写进图里,顺序是下载后缩放", func(t *testing.T) {
+		v := v
+		v.Width, v.Height = 1280, 800
+		opts := CaptureOpts{DrawMouse: true, DDAGrabVendor: gpu.VendorIntel}
+		args, err := BuildArgs(v, opts, nil, qsv, "rtsp://127.0.0.1:8554/live", 2560, 1600)
+		if err != nil {
+			t.Fatalf("BuildArgs 报错:%v", err)
+		}
+		want := "ddagrab=framerate=60,hwdownload,format=bgra,scale=1280:800[v]"
+		if got := valueOf(t, args, "-filter_complex"); got != want {
+			t.Errorf("-filter_complex = %q,想要 %q", got, want)
+		}
+	})
+
+	t.Run("带音频:视频图不占输入序号,音频是 0:a", func(t *testing.T) {
+		opts := CaptureOpts{DrawMouse: true, DDAGrabVendor: gpu.VendorNVIDIA}
+		audio := &AudioInput{
+			URL: "tcp://127.0.0.1:34567", SampleFmt: "f32le",
+			SampleRate: 48000, Channels: 2, BitrateKbps: 96,
+		}
+		args, err := BuildArgs(v, opts, audio, nvenc, "rtsp://127.0.0.1:8554/live", 2560, 1600)
+		if err != nil {
+			t.Fatalf("BuildArgs 报错:%v", err)
+		}
+		var maps []string
+		for i, a := range args {
+			if a == "-map" && i+1 < len(args) {
+				maps = append(maps, args[i+1])
+			}
+		}
+		if len(maps) != 2 || maps[0] != "[v]" || maps[1] != "0:a" {
+			t.Errorf("-map 序列 = %v,想要 [[v] 0:a]", maps)
+		}
+	})
+
+	t.Run("厂商未知时保持原来的 lavfi 输入", func(t *testing.T) {
+		args, err := BuildArgs(v, CaptureOpts{DrawMouse: true}, nil, nvenc,
+			"rtsp://127.0.0.1:8554/live", 2560, 1600)
+		if err != nil {
+			t.Fatalf("BuildArgs 报错:%v", err)
+		}
+		if got := valueOf(t, args, "-i"); got != "ddagrab=framerate=60" {
+			t.Errorf("-i = %q,想要原来的 lavfi 输入", got)
+		}
+		if indexOf(args, "-filter_complex") >= 0 {
+			t.Errorf("厂商未知时不该走 filter_complex:%v", args)
+		}
+	})
 }
 
 // buildArgsForTest 用给定的源、编码器和采集尺寸拼一遍完整命令。

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"sharescreen/internal/gpu"
 )
 
 const createNoWindow = 0x08000000
@@ -106,6 +108,36 @@ func ProbeUsable(exe string, list []Encoder) []Encoder {
 		return list
 	}
 	return out
+}
+
+// DDAGrabVendorUsable 报告本机是否存在指定厂商的 D3D11 适配器。
+//
+// 只创建设备,不打开桌面复制 —— DDA 同一时刻只允许一个会话,探测不能影响
+// 真正的采集。存在的意义:vendor_id 选不到卡时 ffmpeg 会在解析参数阶段直接
+// 失败(实测 `Failed to find d3d11va adapter by vendor id`),而不是退回默认
+// 适配器。调用方据此退回不绑定厂商的旧路径。
+//
+// 超时按"不可用"处理:退回默认路径是原本的行为,比赌一个没验完的设备安全。
+func DDAGrabVendorUsable(exe string, v gpu.Vendor) bool {
+	if v == gpu.VendorUnknown {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, exe,
+		"-hide_banner", "-loglevel", "error",
+		"-init_hw_device", "d3d11va=dx:,vendor_id="+vendorID(v),
+		"-f", "lavfi", "-i", "nullsrc=size=16x16:rate=1",
+		"-frames:v", "1",
+		"-f", "null", "-")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: createNoWindow,
+	}
+
+	return cmd.Run() == nil
 }
 
 // encoderRuns 让一个编码器真编一帧,只回答"它能不能跑起来"。

@@ -47,13 +47,13 @@ type AudioInput struct {
 //
 // 参数顺序遵循 ffmpeg 的约定:输入选项在 -i 之前,输出选项在输入之后。
 func BuildArgs(v config.VideoConfig, o CaptureOpts, audio *AudioInput, enc Encoder, target string, srcW, srcH int) ([]string, error) {
-	input, err := inputArgs(v, o)
+	in, err := inputArgs(v, o, enc, srcW, srcH)
 	if err != nil {
 		return nil, err
 	}
 
 	args := []string{"-hide_banner"}
-	args = append(args, input...)
+	args = append(args, in.args...)
 
 	// 音视频是两个独立输入。输入选项必须紧贴各自的 -i 之前,
 	// 而且所有输入都得排在所有输出选项前面。
@@ -65,11 +65,23 @@ func BuildArgs(v config.VideoConfig, o CaptureOpts, audio *AudioInput, enc Encod
 			"-i", audio.URL)
 	}
 
+	// 指定了适配器时视频来自 filter graph,没有视频 -i,必须自己 -map。
+	// 此时音频输入是 0 号输入(视频图不占输入序号)。
+	if in.graph != "" {
+		args = append(args, "-filter_complex", in.graph, "-map", "[v]")
+		if audio != nil {
+			args = append(args, "-map", "0:a")
+		}
+	}
+
 	// 恒定帧率。实测不加这个,输出帧率会稳定漂到 57–58。
 	// 音频流不受影响 —— 实测带音频时这一项不会报错也不会告警。
 	args = append(args, "-fps_mode", "cfr")
 
-	args = append(args, filterArgs(v, enc, srcW, srcH)...)
+	// filter_complex 路径的缩放/下载已经写进图里,不能再出 -vf。
+	if in.graph == "" {
+		args = append(args, filterArgs(v, enc, srcW, srcH)...)
+	}
 	args = append(args, encoderArgs(enc, v)...)
 	args = append(args, audioArgs(audio)...)
 

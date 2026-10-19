@@ -98,6 +98,10 @@ type Manager struct {
 	// 就是 Unknown,排序退回原来的优先级。
 	prefVendor gpu.Vendor
 
+	// vendorUsableCache 缓存"本机是否存在该厂商的 D3D11 适配器"。
+	// 适配器在一个进程内不会变(和 gpu.Adapters 的缓存同一个前提)。
+	vendorUsableCache map[gpu.Vendor]bool
+
 	state           State
 	child           *proc.Child
 	startedAt       time.Time
@@ -215,6 +219,30 @@ func (m *Manager) SetPreferredVendor(v gpu.Vendor) {
 	m.stMu.Lock()
 	m.prefVendor = v
 	m.stMu.Unlock()
+}
+
+// vendorUsable 报告本机是否存在该厂商的 D3D11 适配器,结果进程内缓存。
+//
+// 用来兜住一种少见但会直接启动失败的情况:EnumDisplayDevices 说显示器
+// 挂在某厂商的卡上,但 DXGI 里没有这块卡。vendor_id 选不到时 ffmpeg 在
+// 参数解析阶段就退出,不会退回默认适配器 —— 这时只能退回不绑定厂商。
+func (m *Manager) vendorUsable(v gpu.Vendor) bool {
+	m.stMu.RLock()
+	r, ok := m.vendorUsableCache[v]
+	m.stMu.RUnlock()
+	if ok {
+		return r
+	}
+
+	r = ffmpeg.DDAGrabVendorUsable(m.tool.Exe, v)
+
+	m.stMu.Lock()
+	if m.vendorUsableCache == nil {
+		m.vendorUsableCache = map[gpu.Vendor]bool{}
+	}
+	m.vendorUsableCache[v] = r
+	m.stMu.Unlock()
+	return r
 }
 
 // errEncoderUnavailable 表示"这个编码器在本机打不开",应当换下一个候选。
@@ -382,6 +410,7 @@ func (m *Manager) startOnce(enc ffmpeg.Encoder) error {
 	m.stMu.RLock()
 	cfg := m.cfg
 	screenW, screenH := m.screenW, m.screenH
+	prefVendor := m.prefVendor
 	m.stMu.RUnlock()
 
 	// 音频必须在 ffmpeg 之前准备好:它决定了 ffmpeg 的音频输入参数
@@ -400,6 +429,15 @@ func (m *Manager) startOnce(enc ffmpeg.Encoder) error {
 	target := fmt.Sprintf("rtsp://127.0.0.1:%d/%s", cfg.RTSPPort, cfg.StreamPath)
 	// 远控开着时不画主机光标,见 ffmpeg.CaptureOptsFor。
 	opts := ffmpeg.CaptureOptsFor(cfg.Video, cfg.RemoteControl.Enabled)
+	// GPU 采集显式绑定显示器所在的适配器,而不是听凭 ddagrab 用 0 号。
+	// 混合显卡机器上 0 号常常是不接显示器的独显,见架构设计 §5.1。
+	opts.DDAGrabVendor = prefVendor
+	// DXGI 里没有这块卡时,vendor_id 会让 ffmpeg 在参数解析阶段直接失败。
+	// 退回不绑定的旧路径,至少保持原来的行为。
+	if cfg.Video.Source == config.SourceScreenDDAGrab &&
+		opts.DDAGrabVendor != gpu.VendorUnknown && !m.vendorUsable(opts.DDAGrabVendor) {
+		opts.DDAGrabVendor = gpu.VendorUnknown
+	}
 	args, err := ffmpeg.BuildArgs(cfg.Video, opts, audioIn, enc, target, screenW, screenH)
 	if err != nil {
 		m.stopAudio()
