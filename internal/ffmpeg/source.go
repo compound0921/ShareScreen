@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"fmt"
+	"strings"
 
 	"sharescreen/internal/config"
 	"sharescreen/internal/screen"
@@ -245,4 +246,29 @@ func pixFmtArgs(v config.VideoConfig, enc Encoder, srcW, srcH int) []string {
 		return nil
 	}
 	return []string{"-pix_fmt", "yuv420p"}
+}
+
+// DDAGrabFailureHint 从 ffmpeg 输出尾部判断 GPU 采集为什么打不开,
+// 并给一句用户能照做的提示。空串表示不是已知的采集层错误。
+//
+// 实测(T2 真机诊断,2026-10-19,混合显卡笔记本):
+//   - ddagrab 默认用 DXGI 适配器 0,那里是 NVIDIA,但显示器由 Intel 核显驱动;
+//     DuplicateOutput 返回 DXGI_ERROR_UNSUPPORTED,ffmpeg 只报
+//     "Selected output not supported";
+//   - 强制指定 Intel 适配器后变成 "Failed to enumerate DXGI output";
+//   - 机器上常驻向日葵 IDD 和 MuMu 虚拟显示适配器,桌面很可能实际由虚拟
+//     显示器承载 —— 这时两块物理 GPU 都枚举不到可复制的输出。
+//
+// 原始报错只说"输出不支持",用户不知道该换采集方式还是该动驱动,所以
+// 这里把下一步写清楚。不自动回退采集源:配置、界面和远控坐标都按当前
+// 采集源算,静默换源会让三者对不上(取舍见 AGENTS.md §10 的 T2)。
+func DDAGrabFailureHint(tail string) string {
+	switch {
+	case strings.Contains(tail, "Selected output not supported"),
+		strings.Contains(tail, "Failed to enumerate DXGI output"):
+		return "这台机器的桌面可能由核显或虚拟显示器承载,GPU 采集找不到可复制的输出。" +
+			"请改用「屏幕(兼容模式)」;如果装了向日葵、MuMu、Parsec 等虚拟显示驱动," +
+			"也可以在设备管理器里禁用它们再试。"
+	}
+	return ""
 }

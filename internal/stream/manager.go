@@ -278,6 +278,12 @@ func (m *Manager) runStart() {
 		// 和编码器无关的失败,换成别的编码器也一样 —— 立刻收手,
 		// 别把同一个错误按候选数重放几遍。
 		if !errors.Is(err, errEncoderUnavailable) {
+			// 采集层失败(如 ddagrab 找不到可复制的输出)时补一句
+			// 用户能照做的提示:ffmpeg 原文只写 "Selected output not
+			// supported",看不出该换采集方式还是该动驱动。
+			if hint := ffmpeg.DDAGrabFailureHint(err.Error()); hint != "" {
+				lastErr = fmt.Errorf("%w\n%s", err, hint)
+			}
 			break
 		}
 	}

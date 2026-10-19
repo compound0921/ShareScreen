@@ -301,18 +301,28 @@ ICE 媒体 **8189/udp**、RTMP 推流入口 **1935**、SRT 推流入口 **8890**
 
 - **采集方式:** GPU 采集,即 `SourceScreenDDAGrab`(`ddagrab=framerate=N`)。
 - **现象:** 在**另外三台设备**上实测,选择 GPU 采集后均无法共享,没有一台成功出画面。
-- **根因(2026-10-19 已复现):** ddagrab 输出的是 d3d11 硬件帧,只有 NVENC 能直接
-  吃;而原来的零拷贝判据只看"采集源 + 是否缩放",**不看编码器**。目标分辨率等于
-  桌面分辨率时,非 NVENC 的机器会得到一条没有任何滤镜的命令,ffmpeg 直接报
+- **编码层根因(2026-10-19 已复现):** ddagrab 输出的是 d3d11 硬件帧,只有 NVENC
+  能直接吃;而原来的零拷贝判据只看"采集源 + 是否缩放",**不看编码器**。目标分辨率
+  等于桌面分辨率时,非 NVENC 的机器会得到一条没有任何滤镜的命令,ffmpeg 直接报
   `Impossible to convert between the formats supported by the filter`,然后每个
   候选编码器都按同样方式失败。实测 `ddagrab + libx264` 必然复现。
-- **修复:** `isZeroCopy` 增加"编码器必须是 `nvenc`"这一条;其余情况在
+- **编码层修复:** `isZeroCopy` 增加"编码器必须是 `nvenc`"这一条;其余情况在
   `filterArgs` 里补 `hwdownload,format=bgra`(要缩放再接 `scale`),见
   `internal/ffmpeg/source.go`、`args.go`。回归用例在
   `internal/ffmpeg/args_test.go` 的 `TestFilterArgsZeroCopy`。
-- **剩余风险:** 三台设备的具体型号/驱动未知。如果仍有失败,先收集显卡型号、系统版本、
-  是否混合显卡,以及 ffmpeg 输出尾部 —— 那说明问题出在 ddagrab 本身(驱动/远程桌面
-  会话),不是编码器。这种情况应按"自动回退兼容模式 + 明确提示"处理,不能静默失败。
-- **验收:** GPU 采集至少能在一台非 NVIDIA 设备上正常共享;确实不支持的机器
-  有明确提示并自动回退。
-- **状态:** 代码已修复,单测与 ffmpeg 实跑已通过;**等待三台设备的真机复测**。
+- **采集层根因(2026-10-19 真机诊断,待最终验证):** 一台 Lenovo 混合显卡笔记本上
+  ddagrab 连输入都打不开,报 `Selected output not supported`(DXGI `DuplicateOutput`
+  返回 `DXGI_ERROR_UNSUPPORTED`)。实测:`dx:0` 是 NVIDIA(不驱动显示器),`dx:1` 是
+  Intel(驱动 1920×1200),但强制 Intel 后报 `Failed to enumerate DXGI output`;
+  机器上常驻向日葵 IDD 与 MuMu 虚拟显示适配器,推断桌面实际由虚拟显示器承载。
+  决定性验证:在设备管理器禁用这两块虚拟显示适配器后重跑采集实验。
+- **采集层处理:** **不自动回退采集源**(配置、界面和远控坐标都按当前采集源算,
+  静默换源会让三者对不上)。在 `internal/stream` 识别上述两条报错,错误信息里追加
+  可操作提示("改用兼容模式 / 禁用虚拟显示驱动"),见 `ffmpeg.DDAGrabFailureHint`。
+  适配器选择要改成 `-filter_complex` + `-filter_hw_device`,等采集层验证后再评估。
+- **剩余风险:** 三台设备各自的确切驱动组合未知;虚拟显示驱动只是当前证据最强的解释。
+  若禁用后仍失败,问题在 DDA 与驱动/会话层,需在物理屏前复测。
+- **验收:** GPU 采集至少能在一台非 NVIDIA 设备上正常共享;采集层不支持的机器
+  给出明确、可操作的提示(不自动回退),而不是只显示 ffmpeg 原文。
+- **状态:** 编码层已修并推送;采集层已定位到"DXGI 输出不可复制",等待禁用虚拟显示
+  驱动后的验证结果。**T2 未关闭。**
