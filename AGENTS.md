@@ -85,6 +85,8 @@ Windows 10 1809+、Go 1.27+、`GOOS=windows`。
 | `-config <路径>` | 换配置文件,默认 `%LOCALAPPDATA%\ShareScreen\config.json` |
 
 > 只有源码构建才需要 Rust;发布包里已经带着构建好的 `tools/wgc-capture.exe`。
+> `wgc-capture/target/` 约 700 MB,发布不需要它;构建完可以
+> `cargo clean --manifest-path wgc-capture/Cargo.toml` 释放空间。
 >
 > `tools/ffmpeg/bin/ffmpeg.exe`、`tools/mediamtx/mediamtx.exe` 和
 > `tools/wgc-capture.exe` 已用 UPX 压缩(101 → 27 MB、54 → 23 MB、411 → 147 KB)。

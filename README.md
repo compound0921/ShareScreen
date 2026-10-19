@@ -187,6 +187,9 @@ go build -ldflags "-H=windowsgui -s -w" -o sharescreen.exe .
 
 `-H=windowsgui` 去掉控制台窗口;`-s -w` 去符号表。
 
+Rust 构建产物在 `wgc-capture/target`(约 700 MB),发布不需要;可执行
+`cargo clean --manifest-path wgc-capture/Cargo.toml` 释放。
+
 ### 发布
 
 ```bash
