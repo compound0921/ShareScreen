@@ -226,6 +226,15 @@ fn run() -> Result<(), BoxError> {
 
     let shared = Arc::new(Shared::default());
 
+    // 黄框能不能关,除了 API 存在,还受系统的"屏幕截图边框"隐私开关影响。
+    // 这里至少把 API 支持情况打进日志;真正的授权只能在系统设置里看。
+    match windows_capture::graphics_capture_api::GraphicsCaptureApi::is_border_settings_supported()
+    {
+        Ok(true) => eprintln!("border suppression: API supported"),
+        Ok(false) => eprintln!("warning: 这台系统不支持关闭 WGC 黄框(IsBorderRequired 不存在)"),
+        Err(e) => eprintln!("warning: 检查 WGC 黄框支持失败: {e}"),
+    }
+
     // 优先关闭 WGC 的黄框(Windows 11 的"正在捕获"提示)。Windows 10 2104
     // 之前没有 IsBorderRequired,库会返回 BorderConfigUnsupported —— 那种
     // 系统上退回默认边框,不能因此起不来。
