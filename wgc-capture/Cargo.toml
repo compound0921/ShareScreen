@@ -18,7 +18,8 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [profile.release]
-opt-level = 3
-lto = true
-strip = true
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
 panic = "abort"

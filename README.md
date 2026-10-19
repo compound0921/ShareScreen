@@ -170,11 +170,11 @@ go run ./cmd/portmapcheck -map     # 试建一次映射,试完删除
 ffmpeg 压缩包里还带 `ffplay`、`ffprobe` 和 `doc/`,本程序只用 `ffmpeg.exe`,
 其余可以删掉。
 
-体积优化(可选):用 UPX 压缩 ffmpeg 和 MediaMTX,约 101 MB → 27 MB、
-54 MB → 23 MB:
+体积优化(可选):用 UPX 压缩三个组件,约 101 MB → 27 MB、54 MB → 23 MB、
+411 KB → 147 KB:
 
 ```bash
-upx --best --lzma tools/ffmpeg/bin/ffmpeg.exe tools/mediamtx/mediamtx.exe
+upx --best --lzma tools/ffmpeg/bin/ffmpeg.exe tools/mediamtx/mediamtx.exe tools/wgc-capture.exe
 ```
 
 UPX 只影响装载,不影响硬件编码和推流;个别杀毒软件可能对加壳程序误报。
