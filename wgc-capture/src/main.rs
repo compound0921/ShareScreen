@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
+use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
 use windows_capture::monitor::Monitor;
@@ -179,6 +179,29 @@ fn main() {
     }
 }
 
+fn start_capture(
+    shared: Arc<Shared>,
+    cursor: bool,
+    border: DrawBorderSettings,
+) -> Result<CaptureControl<Handler, BoxError>, String> {
+    let monitor = Monitor::primary().map_err(|e| e.to_string())?;
+    let settings = Settings::new(
+        monitor,
+        if cursor {
+            CursorCaptureSettings::WithCursor
+        } else {
+            CursorCaptureSettings::WithoutCursor
+        },
+        border,
+        SecondaryWindowSettings::Default,
+        MinimumUpdateIntervalSettings::Default,
+        DirtyRegionSettings::Default,
+        ColorFormat::Bgra8,
+        shared,
+    );
+    Handler::start_free_threaded(settings).map_err(|e| e.to_string())
+}
+
 fn run() -> Result<(), BoxError> {
     let args = parse_args().map_err(|e| -> BoxError { e.into() })?;
 
@@ -202,25 +225,23 @@ fn run() -> Result<(), BoxError> {
     let fps = args.fps;
 
     let shared = Arc::new(Shared::default());
-    let monitor = Monitor::primary().map_err(|e| -> BoxError { e.to_string().into() })?;
 
-    let settings = Settings::new(
-        monitor,
-        if args.cursor {
-            CursorCaptureSettings::WithCursor
-        } else {
-            CursorCaptureSettings::WithoutCursor
-        },
-        DrawBorderSettings::Default,
-        SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Default,
-        DirtyRegionSettings::Default,
-        ColorFormat::Bgra8,
+    // 优先关闭 WGC 的黄框(Windows 11 的"正在捕获"提示)。Windows 10 2104
+    // 之前没有 IsBorderRequired,库会返回 BorderConfigUnsupported —— 那种
+    // 系统上退回默认边框,不能因此起不来。
+    let control = match start_capture(
         shared.clone(),
-    );
-
-    let control =
-        Handler::start_free_threaded(settings).map_err(|e| -> BoxError { e.to_string().into() })?;
+        args.cursor,
+        DrawBorderSettings::WithoutBorder,
+    ) {
+        Ok(c) => c,
+        Err(e) if e.contains("capture border") => {
+            eprintln!("warning: 这台系统不支持关闭 WGC 黄框,退回默认边框: {e}");
+            start_capture(shared.clone(), args.cursor, DrawBorderSettings::Default)
+                .map_err(|e| -> BoxError { e.into() })?
+        }
+        Err(e) => return Err(e.into()),
+    };
     eprintln!("capture started, waiting for first frame");
 
     // 等第一帧:没有它就不能确定真实尺寸,ffmpeg 也无法按固定帧大小读。
