@@ -9,14 +9,15 @@
 //	  使用说明.txt                      给用户看的那一页
 //	  tools/ffmpeg/bin/ffmpeg.exe      采集和编码
 //	  tools/mediamtx/mediamtx.exe      WebRTC 分发
+//	  tools/wgc-capture.exe            WGC 采集(可选源,主显示器)
 //
-// 为什么发文件夹而不是单个 exe:早先有一版把两个组件嵌进二进制,编出来是
-// 一个 165 MB 的单文件,拷到哪都能跑。但它把 ffmpeg 和 MediaMTX 藏进了 exe
-// 里 —— 用户看不见里面装着什么,组件版本对不上时既换不掉也说不清,出问题时
-// 连"到底跑的是哪份 ffmpeg"都无从确认。现在三样东西各归各位。
+// 为什么发文件夹而不是单个 exe:早先有一版把这些组件嵌进二进制,编出来是
+// 一个 165 MB 的单文件,拷到哪都能跑。但它把组件藏进了 exe 里 —— 用户看不见
+// 里面装着什么,组件版本对不上时既换不掉也说不清,出问题时连"到底跑的是哪份
+// ffmpeg"都无从确认。现在各归各位。
 //
-// 仍然要打成 zip:两个组件合计 155 MB,而它们本身压不动,能压下去的只有
-// 程序本体那一部分,打完大约七折。
+// 仍然要打成 zip:ffmpeg 和 MediaMTX 合计 155 MB,而它们本身压不动,能压下去
+// 的只有程序本体那一部分,打完大约七折。
 package main
 
 import (
@@ -55,6 +56,9 @@ var payload = []struct {
 		filepath.Join("tools", "ffmpeg", "bin", "ffmpeg.exe")},
 	{filepath.Join("tools", "mediamtx", "mediamtx.exe"),
 		filepath.Join("tools", "mediamtx", "mediamtx.exe")},
+	// tools/wgc-capture.exe: WGC 采集(可选源,主显示器)
+	{filepath.Join("tools", "wgc-capture.exe"),
+		filepath.Join("tools", "wgc-capture.exe")},
 }
 
 func main() {

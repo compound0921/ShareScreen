@@ -33,6 +33,10 @@ Windows 屏幕共享。本机采集画面(可选桌面音频),别人用浏览器
 
 模块名 `sharescreen`,`go.mod` 写 `go 1.27.0`,单仓库。
 
+> `screen_wgc` 采集源另有一个独立进程 `tools/wgc-capture.exe`,由 `wgc-capture/`
+> 里的 Rust 源码构建。它**不在 Go 依赖清单里**;编码、音频和推流仍然全部由
+> ffmpeg 负责。
+
 ---
 
 ## 1. 动手前先读哪一份
@@ -63,6 +67,7 @@ Windows 10 1809+、Go 1.27+、`GOOS=windows`。
 | 目的 | 命令 |
 |---|---|
 | 编译本程序 | `go build -ldflags "-H=windowsgui -s -w" -o sharescreen.exe .` |
+| 构建 WGC 采集模块 | `cargo build --release --manifest-path wgc-capture/Cargo.toml`,把产物拷到 `tools/wgc-capture.exe` |
 | 全包编译检查 | `go build ./...` |
 | 测试 | `go test ./...` |
 | 静态检查 | `go vet ./...`(**保持干净**,改完必跑) |
@@ -80,6 +85,8 @@ Windows 10 1809+、Go 1.27+、`GOOS=windows`。
 | `-no-browser` | 不自动开浏览器 |
 | `-print-args` | 打印将执行的 ffmpeg 命令后退出 |
 | `-config <路径>` | 换配置文件,默认 `%LOCALAPPDATA%\ShareScreen\config.json` |
+
+> 只有源码构建才需要 Rust;发布包里已经带着构建好的 `tools/wgc-capture.exe`。
 
 **没有 CI、没有 Makefile、没有 golangci 配置,别假设它们存在。** 这个仓库的"检查"就是
 `go build ./...` + `go vet ./...` + `go test ./...`,加上真机手测(见 §6)。
@@ -120,6 +127,7 @@ ICE 媒体 **8189/udp**、RTMP 推流入口 **1935**、SRT 推流入口 **8890**
 | 改了 | 连带要动 |
 |---|---|
 | 采集源 / 编码参数 | `internal/ffmpeg/args.go` + `args_test.go`,并**更新 `docs/架构设计.md` §5/§6 的实测表** |
+| WGC 采集源 | `internal/ffmpeg/{args,source}.go`、`internal/stream/manager.go`、`internal/proc/child.go`、`wgc-capture/`,产物 `tools/wgc-capture.exe` |
 | 采集范围(远控坐标) | `ffmpeg.CaptureRect` + `docs/架构设计.md` §12.3 那张表 |
 | 编码器选择 | `internal/ffmpeg/priority.go`(三层选择,见 §6.1) |
 | MediaMTX 配置 | `internal/mediamtx/` + 架构设计附录 B |
@@ -208,6 +216,7 @@ ICE 媒体 **8189/udp**、RTMP 推流入口 **1935**、SRT 推流入口 **8890**
 | 改了什么 | 怎么验 |
 |---|---|
 | ffmpeg 参数 | `go run . -print-args` 看实际命令,对照 §4 的红线逐条过 |
+| WGC 采集 | 选中「屏幕(WGC)」,浏览器能看;启停后 `tasklist \| findstr wgc-capture` 无残留;180° 旋转画面正立 |
 | 纯逻辑 | `go test ./...`(现有 18 个 `_test.go`,新逻辑尽量补) |
 | 采集 / 音频 / 远控 / 托盘 / 弹窗 | **必须在真 Windows 桌面上手测** |
 
@@ -337,6 +346,7 @@ ICE 媒体 **8189/udp**、RTMP 推流入口 **1935**、SRT 推流入口 **8890**
 - **验收:** GPU 采集至少能在一台混合显卡设备上正常共享;采集层不支持的机器
   给出明确、可操作的提示(不自动回退),而不是只显示 ffmpeg 原文。
 - **状态:** 编码层已修;采集层已加适配器绑定与精确提示;诊断机已确认 ddagrab
-  在该拓扑下不可用(与虚拟显示无关)。**WGC 原型 0.1.0 已在诊断机真机测试通过
-  (2026-10-19)** —— 证明 WGC 能绕开该拓扑,方案评估见
-  `docs/WGC-采集方案评估.md`。**T2 未关闭**:进入 WGC 集成阶段;另外两台仍待测。
+  在该拓扑下不可用(与虚拟显示无关)。WGC 原型在诊断机真机测试通过后,
+  **`screen_wgc` 已集成**:Rust 采集进程 → NV12 命名管道 → ffmpeg,主显示器,
+  开发机端到端(含音频)已跑通。**T2 未关闭** —— 等待在三台失败设备上用
+  新构建复测;方案与边界见 `docs/WGC-采集方案评估.md`。

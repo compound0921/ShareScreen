@@ -37,17 +37,39 @@ type AudioInput struct {
 	BitrateKbps int
 }
 
+// VideoInput 描述一路由外部采集进程喂给 ffmpeg 的原始视频。
+//
+// 目前只有 WGC 采集(tools/wgc-capture.exe)使用:它把主显示器画面转成
+// NV12,通过命名管道交给 ffmpeg。宽高来自采集进程的 readiness 行,不能
+// 用配置里的目标尺寸 —— ffmpeg 要按**源**尺寸切分 rawvideo 帧。
+type VideoInput struct {
+	URL      string // 命名管道,如 \\.\pipe\sharescreen-wgc-...
+	Width    int
+	Height   int
+	FPS      int
+	PixelFmt string // 目前只用 nv12
+}
+
 // BuildArgs 组装完整的 ffmpeg 参数(不含可执行文件本身)。
 //
 // target 是推流地址,例如 rtsp://127.0.0.1:8554/live。
-// audio 为 nil 时不带音频。
+// audio 为 nil 时不带音频;video 为 nil 时视频由 inputArgs 自己决定
+// (`screen_wgc` 必须传 video,其余源传 nil)。
 // srcW/srcH 是采集源的原始尺寸(桌面分辨率),用来判断"目标尺寸等于源尺寸"
 // 这种不需要缩放的伪缩放情况;传 0 表示未知。
 // o 是采集阶段的行为开关 —— 用 CaptureOptsFor 从配置推出来,别在这里现编。
 //
 // 参数顺序遵循 ffmpeg 的约定:输入选项在 -i 之前,输出选项在输入之后。
-func BuildArgs(v config.VideoConfig, o CaptureOpts, audio *AudioInput, enc Encoder, target string, srcW, srcH int) ([]string, error) {
-	in, err := inputArgs(v, o, enc, srcW, srcH)
+func BuildArgs(v config.VideoConfig, o CaptureOpts, audio *AudioInput, video *VideoInput, enc Encoder, target string, srcW, srcH int) ([]string, error) {
+	// WGC 的源尺寸由采集进程决定,配置里的目标尺寸只用于缩放。
+	if v.Source == config.SourceScreenWGC {
+		if video == nil {
+			return nil, fmt.Errorf("WGC 采集缺少视频输入参数")
+		}
+		srcW, srcH = video.Width, video.Height
+	}
+
+	in, err := inputArgs(v, o, video, enc, srcW, srcH)
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +85,15 @@ func BuildArgs(v config.VideoConfig, o CaptureOpts, audio *AudioInput, enc Encod
 			"-ar", strconv.Itoa(audio.SampleRate),
 			"-ac", strconv.Itoa(audio.Channels),
 			"-i", audio.URL)
+	}
+
+	// WGC 的视频是 0 号输入,音频是 1 号输入。显式 map,别让 ffmpeg 的
+	// 默认选流规则在"两路输入但只有一路有视频"时猜错。
+	if v.Source == config.SourceScreenWGC {
+		args = append(args, "-map", "0:v:0")
+		if audio != nil {
+			args = append(args, "-map", "1:a:0")
+		}
 	}
 
 	// 指定了适配器时视频来自 filter graph,没有视频 -i,必须自己 -map。

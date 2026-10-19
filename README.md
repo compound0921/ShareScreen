@@ -2,26 +2,28 @@
 
 Windows 屏幕共享。本机采集画面,别人用浏览器打开链接就能看,不需要装任何客户端。
 
-> 发布件是**一个文件夹**:程序本体、`tools/` 里的两个组件、一份 `使用说明.txt`。
+> 发布件是**一个文件夹**:程序本体、`tools/` 里的辅助组件、一份 `使用说明.txt`。
 > 整个文件夹解压出来保持原样就能跑,机器上不用装任何东西。见[发布](#发布)。
 
 ---
 
 ## 准备(只有自己编译时才需要)
 
-**用发布包的人这一节整节跳过** —— 解压出来的文件夹里已经带着这两个组件了。
+**用发布包的人这一节整节跳过** —— 解压出来的文件夹里已经带着这些组件了。
 
-从源码编译才要自己下。程序依赖两个第三方组件,都是免安装单文件,下载后按
-下面的路径放好:
+从源码编译才要自己下。ffmpeg 和 MediaMTX 是免安装单文件,下载后按下面的
+路径放好;WGC 采集模块是本项目自己的 Rust 源码,需要本地构建:
 
-| 组件 | 下载 | 放成 |
+| 组件 | 来源 | 放成 |
 |---|---|---|
 | **ffmpeg** | [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) 选 `ffmpeg-release-essentials.zip` | `tools/ffmpeg/bin/ffmpeg.exe` |
 | **MediaMTX** | [GitHub Releases](https://github.com/bluenviron/mediamtx/releases) 选 `mediamtx_v*_windows_amd64.zip` | `tools/mediamtx/mediamtx.exe` |
+| **wgc-capture** | 本项目 `wgc-capture/`,需要 Rust: `cargo build --release --manifest-path wgc-capture/Cargo.toml` | `tools/wgc-capture.exe` |
 
-压缩包里带的版本号文件夹重命名成 `ffmpeg` / `mediamtx` 即可。
+压缩包里带的版本号文件夹重命名成 `ffmpeg` / `mediamtx` 即可。WGC 模块构建
+完成后把 `wgc-capture/target/release/wgc-capture.exe` 拷到 `tools/wgc-capture.exe`。
 
-> 这两个文件既是编译的输入,也是发布的内容 —— `genrelease` 会把它们原样
+> 这些文件既是编译的输入,也是发布的内容 —— `genrelease` 会把它们原样
 > 拷进发布文件夹。换 ffmpeg 版本就是换这一份文件。
 
 ## 运行
@@ -312,7 +314,7 @@ go run ./cmd/portmapcheck -map       # 试建一次映射,试完自动删掉
 
 ## 停止
 
-托盘图标右键 → 退出。ffmpeg 和 MediaMTX 会一起退出,不留残留进程。
+托盘图标右键 → 退出。ffmpeg、MediaMTX 和 WGC 采集进程会一起退出,不留残留进程。
 
 关掉控制页也一样 —— 两条路都走同一套收尾流程,不区分。
 
@@ -324,10 +326,18 @@ go run ./cmd/portmapcheck -map       # 试建一次映射,试完自动删掉
 
 ## 构建
 
-需要 Go 1.27+。国内建议先 `go env -w GOPROXY=https://goproxy.cn,direct`。
+需要 Go 1.27+;构建 WGC 采集模块还需要 Rust 工具链(`cargo`)。国内建议先
+`go env -w GOPROXY=https://goproxy.cn,direct`。
 
-先按[「准备」](#准备只有自己编译时才需要)把两个组件下好 —— 编译要用到它们,
-但不再嵌进 exe,而是留在 `tools/` 里。
+先按[「准备」](#准备只有自己编译时才需要)把 ffmpeg / MediaMTX 下好,并构建
+WGC 模块:
+
+```bash
+cargo build --release --manifest-path wgc-capture/Cargo.toml
+cp wgc-capture/target/release/wgc-capture.exe tools/wgc-capture.exe
+```
+
+这些组件是编译的输入,但不再嵌进 exe,而是留在 `tools/` 里。然后:
 
 ```bash
 go build -ldflags "-H=windowsgui -s -w" -o sharescreen.exe .
@@ -359,17 +369,18 @@ ShareScreen-1.4/
   使用说明.txt                      给用户看的那一页
   tools/ffmpeg/bin/ffmpeg.exe      采集和编码
   tools/mediamtx/mediamtx.exe      WebRTC 分发
+  tools/wgc-capture.exe            WGC 采集(可选源,主显示器)
 ```
 
 发给别人就把整个 zip 发过去,让对方解压后直接双击文件夹里的 exe。
 
-> **为什么发文件夹,不发单个 exe。** 早先有一版把两个组件嵌进二进制,编出来是
-> 一个 165 MB 的单文件,拷到哪都能跑 —— 但它把 ffmpeg 和 MediaMTX 藏进了 exe 里。
+> **为什么发文件夹,不发单个 exe。** 早先有一版把这些组件嵌进二进制,编出来是
+> 一个 165 MB 的单文件,拷到哪都能跑 —— 但它把组件藏进了 exe 里。
 > 用户看不见里面装着什么,组件版本对不上时既换不掉也说不清,出问题时连"到底
-> 跑的是哪份 ffmpeg"都无从确认。现在三样东西各归各位,换组件就是换 `tools/`
+> 跑的是哪份 ffmpeg"都无从确认。现在各组件各归各位,换组件就是换 `tools/`
 > 里的文件。
 >
-> 仍然要打成 zip:两个组件合计 155 MB 且基本压不动,能压下去的只有程序本体
+> 仍然要打成 zip:ffmpeg 和 MediaMTX 合计 155 MB 且基本压不动,能压下去的只有程序本体
 > 那 8 MB,打完大约七折。
 
 `使用说明.txt` 的来源是 [docs/使用说明.txt](docs/使用说明.txt),打包时会转成

@@ -14,8 +14,9 @@ import (
 // 保持原样即可。二进制本身只有 8 MB,两个组件在目录里看得见也换得掉。
 
 var (
-	sidecarFFmpeg   = filepath.Join("tools", "ffmpeg", "bin", "ffmpeg.exe")
-	sidecarMediaMTX = filepath.Join("tools", "mediamtx", "mediamtx.exe")
+	sidecarFFmpeg     = filepath.Join("tools", "ffmpeg", "bin", "ffmpeg.exe")
+	sidecarMediaMTX   = filepath.Join("tools", "mediamtx", "mediamtx.exe")
+	sidecarWGCCapture = filepath.Join("tools", "wgc-capture.exe")
 )
 
 // resolveSidecar 按顺序在若干根目录下查找 rel,最后回退到 PATH。

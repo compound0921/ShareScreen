@@ -341,7 +341,8 @@ CPU 占用(任务管理器,ffmpeg 进程):  ⬜ 待确认
 |---|---|---|
 | `Cannot load nvcuda.dll` | N 卡驱动未装或过旧 | 更新显卡驱动,或换 `h264_qsv` / `libx264` |
 | `Error opening input ... gdigrab` | 桌面捕获被拒 | 确认不是运行在无桌面会话(RDP 断开会话可能失败) |
-| `Selected output not supported` / `Failed to enumerate DXGI output` | DXGI 输出归属与显示适配器错位,ddagrab 没有可复制的桌面输出 | 改用兼容模式;或切换独显直连/更新显卡驱动(实测与虚拟显示驱动无关,禁用 IDD 无效;详见架构设计 §5.1) |
+| `Selected output not supported` / `Failed to enumerate DXGI output` | DXGI 输出归属与显示适配器错位,ddagrab 没有可复制的桌面输出 | 改用兼容模式;或切换独显直连/更新显卡驱动(实测与虚拟显示驱动无关,禁用 IDD 无效;详见架构设计 §5.1)。这类机器也可以改选「屏幕(WGC 采集)」 |
+| WGC 采集提示「未找到 tools/wgc-capture.exe」或采集进程提前退出 | Rust 模块未构建/版本不匹配 | 按 README 构建并拷到 `tools/wgc-capture.exe`;状态里的 `wgc:` 行是采集进程的输出 |
 | `speed=0.3x` 之类远低于 1 | 编码器跟不上 / CPU 满载 | 换硬件编码器;降低分辨率或帧率 |
 | 画面尺寸不对 | 高 DPI 缩放 | 用 `-vf scale=1280:720` 强制输出尺寸 |
 | 抓到的是黑屏 | 多显示器 / 会话问题 | 试试 `-i desktop` 换成指定区域:`-i "desktop"` 配合 `-offset_x` 等参数 |

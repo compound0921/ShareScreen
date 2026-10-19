@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"sharescreen/internal/config"
@@ -58,6 +59,7 @@ func CaptureOptsFor(v config.VideoConfig, remoteEnabled bool) CaptureOpts {
 // 只有 ddagrab 需要补。它走 DXGI 桌面复制,拿到的是未旋转的原始画面 ——
 // 旋转是系统在扫描输出那一步做的;显示器设成 180° 时,采到的就是倒的。
 // gdigrab 走 GDI,拿到的已经是转好的画面,补了就反而错了。
+// WGC 走 DWM 合成,拿到的同样是最终画面 —— 预期为 0,180° 待真机验证。
 //
 // 实测确认过这条前提:同一块 180° 的屏,ddagrab 的画面旋转 180° 之后与
 // gdigrab 的 SSIM 是 0.9999,不旋转只有 0.445。
@@ -88,10 +90,37 @@ type inputSpec struct {
 }
 
 // inputArgs 返回采集源的输入段参数。
-func inputArgs(v config.VideoConfig, o CaptureOpts, enc Encoder, srcW, srcH int) (inputSpec, error) {
+func inputArgs(v config.VideoConfig, o CaptureOpts, video *VideoInput, enc Encoder, srcW, srcH int) (inputSpec, error) {
 	fps := fmt.Sprintf("%d", v.FPS)
 
 	switch v.Source {
+	case config.SourceScreenWGC:
+		if video == nil {
+			return inputSpec{}, fmt.Errorf("WGC 采集缺少视频输入参数")
+		}
+		if video.Width <= 0 || video.Height <= 0 {
+			return inputSpec{}, fmt.Errorf("WGC 采集的视频尺寸无效: %dx%d", video.Width, video.Height)
+		}
+		if video.URL == "" {
+			return inputSpec{}, fmt.Errorf("WGC 采集缺少命名管道地址")
+		}
+		pix := video.PixelFmt
+		if pix == "" {
+			pix = "nv12"
+		}
+		inputFPS := v.FPS
+		if video.FPS > 0 {
+			inputFPS = video.FPS
+		}
+		// rawvideo 没有帧头,尺寸/像素格式/帧率必须在 -i 之前给全。
+		return inputSpec{args: []string{
+			"-f", "rawvideo",
+			"-pix_fmt", pix,
+			"-video_size", fmt.Sprintf("%dx%d", video.Width, video.Height),
+			"-framerate", strconv.Itoa(inputFPS),
+			"-i", video.URL,
+		}}, nil
+
 	case config.SourceScreenDDAGrab:
 		// 知道显示器挂在哪块卡上时,显式指定适配器。ddagrab 自己默认用
 		// 适配器 0,混合显卡机器上那常常是不接显示器的独显。
@@ -215,7 +244,7 @@ func vendorID(v gpu.Vendor) string {
 // 禁用开关:让用户勾上一个注定失败的开关再告诉他不行,是更差的体验。
 func SupportsRemote(v config.VideoConfig) bool {
 	switch v.Source {
-	case config.SourceScreenDDAGrab, config.SourceScreenGDI:
+	case config.SourceScreenDDAGrab, config.SourceScreenWGC, config.SourceScreenGDI:
 		return true
 	}
 	return false
@@ -239,7 +268,8 @@ func SupportsRemote(v config.VideoConfig) bool {
 // 所以 gdigrab 那一支必须用虚拟桌面的矩形(原点可能是负数),而不是主屏。
 func CaptureRect(v config.VideoConfig) (screen.Rect, bool) {
 	switch v.Source {
-	case config.SourceScreenDDAGrab:
+	case config.SourceScreenDDAGrab, config.SourceScreenWGC:
+		// WGC 第一阶段只采主显示器,和 ddagrab 一样。
 		w, h := screen.Size()
 		if w <= 0 || h <= 0 {
 			return screen.Rect{}, false

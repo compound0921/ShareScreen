@@ -14,6 +14,13 @@ const (
 	// 屏幕,走 ddagrab(DXGI Desktop Duplication)。性能最好,但不支持单窗口,
 	// 而且依赖驱动和显卡,个别机器上抓不到画面。
 	SourceScreenDDAGrab SourceType = "screen_ddagrab"
+	// 屏幕,走 Windows.Graphics.Capture(WGC),由 tools/wgc-capture.exe 采集,
+	// 经命名管道把 NV12 原始帧交给 ffmpeg。
+	//
+	// 只支持**主显示器**。存在的理由:ddagrab 依赖"DDA 输出必须归属于当前
+	// 适配器",在部分混合显卡机器上这个拓扑本身就是错的(见架构设计 §5.1);
+	// WGC 走 DWM 合成层,不依赖该前提,已在真机上验证能抓到画面。
+	SourceScreenWGC SourceType = "screen_wgc"
 	// 屏幕,走 gdigrab。**默认源** —— 性能不如 ddagrab,但它对硬件没有要求,
 	// 任何一台 Windows 上都能出画面。默认值要的是"一定能用",不是"最快"。
 	SourceScreenGDI SourceType = "screen_gdigrab"
@@ -37,7 +44,7 @@ const (
 // ValidSource 报告 s 是否为已知的采集源。
 func ValidSource(s SourceType) bool {
 	switch s {
-	case SourceScreenDDAGrab, SourceScreenGDI, SourceWindow, SourceOBS, SourceOBSPush:
+	case SourceScreenDDAGrab, SourceScreenWGC, SourceScreenGDI, SourceWindow, SourceOBS, SourceOBSPush:
 		return true
 	}
 	return false

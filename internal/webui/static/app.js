@@ -82,6 +82,7 @@ let saveTimer = null;
 const SOURCE_HINT = {
   screen_gdigrab: '通用,任何机器上都能出画面。CPU 占用高于 GPU 采集。',
   screen_ddagrab: 'GPU 采集,CPU 占用最低,支持 60fps。个别显卡/驱动上可能抓不到画面。',
+  screen_wgc: '走 DWM 合成层,适合 GPU 采集打不开的混合显卡机器。只支持主显示器;不可用时请改用兼容模式。',
   window: '窗口被遮挡时,画面会被遮挡物盖住。',
   obs: '需先在 OBS 里启动虚拟摄像头。声音仍来自桌面音频。',
   obs_push: '画面和声音都由 OBS 提供,参数也在 OBS 里设。',

@@ -1,9 +1,9 @@
-// Package paths 定位随程序分发的第三方工具(ffmpeg / MediaMTX)。
+// Package paths 定位随程序分发的辅助程序(ffmpeg / MediaMTX / wgc-capture)。
 //
 // 工具和 exe 一起分发:解压出来的文件夹里,`ShareScreen.exe` 旁边就是一个
-// `tools/` 目录,两个组件按固定路径放在里面。查找顺序见 sidecar.go。
+// `tools/` 目录,各组件按固定路径放在里面。查找顺序见 sidecar.go。
 //
-// 为什么不做成单个 exe:早先有过一版把两个工具嵌进二进制,拷到哪台机器
+// 为什么不做成单个 exe:早先有过一版把这些工具嵌进二进制,拷到哪台机器
 // 都能跑,代价是 8 MB 变成 165 MB、每次编译都要重新打包 155 MB,更要命的是
 // 用户看不见里面装着什么 —— 组件版本对不上时,既没法换也没法说清楚。
 // 现在统一按文件夹分发。
@@ -29,6 +29,22 @@ func ResolveFFmpeg() (*Tool, error) {
 // ResolveMediaMTX 定位 MediaMTX。
 func ResolveMediaMTX() (*Tool, error) {
 	return resolveSidecar(sidecarMediaMTX, "mediamtx")
+}
+
+// ResolveWGCCapture 定位 WGC 采集模块。
+//
+// 它不像 ffmpeg / MediaMTX 那样能从网上下载,只能从源码构建;找不到时
+// 直接把构建命令写进错误里,省得用户只看到"缺文件"。
+func ResolveWGCCapture() (*Tool, error) {
+	t, err := resolveSidecar(sidecarWGCCapture, "wgc-capture")
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w\nWGC 采集模块需要从源码构建:\n"+
+				"  cargo build --release --manifest-path wgc-capture/Cargo.toml\n"+
+				"  然后把 wgc-capture/target/release/wgc-capture.exe 拷到 tools/wgc-capture.exe",
+			err)
+	}
+	return t, nil
 }
 
 // DataDir 返回配置等可写数据的存放目录(%LOCALAPPDATA%\ShareScreen),

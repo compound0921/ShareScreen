@@ -88,7 +88,7 @@ func TestInputArgsDrawMouse(t *testing.T) {
 			if tc.src == config.SourceWindow {
 				v.WindowTitle = "记事本"
 			}
-			spec, err := inputArgs(v, CaptureOpts{DrawMouse: tc.draw}, Encoder{Kind: "nvenc"}, 0, 0)
+			spec, err := inputArgs(v, CaptureOpts{DrawMouse: tc.draw}, nil, Encoder{Kind: "nvenc"}, 0, 0)
 			if err != nil {
 				t.Fatalf("inputArgs 报错:%v", err)
 			}
@@ -129,7 +129,7 @@ func TestBuildArgsThreadsCaptureOpts(t *testing.T) {
 	enc := Encoder{Name: "h264_nvenc", Kind: "nvenc", Hardware: true}
 	v := screenCfg(config.SourceScreenDDAGrab)
 
-	args, err := BuildArgs(v, CaptureOpts{DrawMouse: false}, nil, enc, "rtsp://127.0.0.1:8554/live", 0, 0)
+	args, err := BuildArgs(v, CaptureOpts{DrawMouse: false}, nil, nil, enc, "rtsp://127.0.0.1:8554/live", 0, 0)
 	if err != nil {
 		t.Fatalf("BuildArgs 报错:%v", err)
 	}
@@ -137,7 +137,7 @@ func TestBuildArgsThreadsCaptureOpts(t *testing.T) {
 		t.Errorf("-i 的值 = %q,想要带上 draw_mouse=0", got)
 	}
 
-	on, err := BuildArgs(v, CaptureOpts{DrawMouse: true}, nil, enc, "rtsp://127.0.0.1:8554/live", 0, 0)
+	on, err := BuildArgs(v, CaptureOpts{DrawMouse: true}, nil, nil, enc, "rtsp://127.0.0.1:8554/live", 0, 0)
 	if err != nil {
 		t.Fatalf("BuildArgs 报错:%v", err)
 	}
@@ -298,7 +298,7 @@ func TestBuildArgsDDAGrabVendor(t *testing.T) {
 
 	t.Run("NVIDIA + NVENC + 不缩放:零拷贝,图里不下载", func(t *testing.T) {
 		opts := CaptureOpts{DrawMouse: true, DDAGrabVendor: gpu.VendorNVIDIA}
-		args, err := BuildArgs(v, opts, nil, nvenc, "rtsp://127.0.0.1:8554/live", 2560, 1600)
+		args, err := BuildArgs(v, opts, nil, nil, nvenc, "rtsp://127.0.0.1:8554/live", 2560, 1600)
 		if err != nil {
 			t.Fatalf("BuildArgs 报错:%v", err)
 		}
@@ -321,7 +321,7 @@ func TestBuildArgsDDAGrabVendor(t *testing.T) {
 
 	t.Run("Intel + QSV + 不缩放:图里必须下载回内存", func(t *testing.T) {
 		opts := CaptureOpts{DrawMouse: true, DDAGrabVendor: gpu.VendorIntel}
-		args, err := BuildArgs(v, opts, nil, qsv, "rtsp://127.0.0.1:8554/live", 2560, 1600)
+		args, err := BuildArgs(v, opts, nil, nil, qsv, "rtsp://127.0.0.1:8554/live", 2560, 1600)
 		if err != nil {
 			t.Fatalf("BuildArgs 报错:%v", err)
 		}
@@ -337,7 +337,7 @@ func TestBuildArgsDDAGrabVendor(t *testing.T) {
 		v := v
 		v.Width, v.Height = 1280, 800
 		opts := CaptureOpts{DrawMouse: true, DDAGrabVendor: gpu.VendorIntel}
-		args, err := BuildArgs(v, opts, nil, qsv, "rtsp://127.0.0.1:8554/live", 2560, 1600)
+		args, err := BuildArgs(v, opts, nil, nil, qsv, "rtsp://127.0.0.1:8554/live", 2560, 1600)
 		if err != nil {
 			t.Fatalf("BuildArgs 报错:%v", err)
 		}
@@ -353,7 +353,7 @@ func TestBuildArgsDDAGrabVendor(t *testing.T) {
 			URL: "tcp://127.0.0.1:34567", SampleFmt: "f32le",
 			SampleRate: 48000, Channels: 2, BitrateKbps: 96,
 		}
-		args, err := BuildArgs(v, opts, audio, nvenc, "rtsp://127.0.0.1:8554/live", 2560, 1600)
+		args, err := BuildArgs(v, opts, audio, nil, nvenc, "rtsp://127.0.0.1:8554/live", 2560, 1600)
 		if err != nil {
 			t.Fatalf("BuildArgs 报错:%v", err)
 		}
@@ -369,7 +369,7 @@ func TestBuildArgsDDAGrabVendor(t *testing.T) {
 	})
 
 	t.Run("厂商未知时保持原来的 lavfi 输入", func(t *testing.T) {
-		args, err := BuildArgs(v, CaptureOpts{DrawMouse: true}, nil, nvenc,
+		args, err := BuildArgs(v, CaptureOpts{DrawMouse: true}, nil, nil, nvenc,
 			"rtsp://127.0.0.1:8554/live", 2560, 1600)
 		if err != nil {
 			t.Fatalf("BuildArgs 报错:%v", err)
@@ -386,10 +386,86 @@ func TestBuildArgsDDAGrabVendor(t *testing.T) {
 // buildArgsForTest 用给定的源、编码器和采集尺寸拼一遍完整命令。
 func buildArgsForTest(t *testing.T, v config.VideoConfig, enc Encoder, srcW, srcH int) []string {
 	t.Helper()
-	args, err := BuildArgs(v, CaptureOpts{DrawMouse: true}, nil, enc,
+	args, err := BuildArgs(v, CaptureOpts{DrawMouse: true}, nil, nil, enc,
 		"rtsp://127.0.0.1:8554/live", srcW, srcH)
 	if err != nil {
 		t.Fatalf("BuildArgs 报错:%v", err)
 	}
 	return args
+}
+
+// valuesOf 返回 args 里 opt 后面跟着的所有值(用于 -map 这种可重复选项)。
+func valuesOf(args []string, opt string) []string {
+	var out []string
+	for i, a := range args {
+		if a == opt && i+1 < len(args) {
+			out = append(out, args[i+1])
+		}
+	}
+	return out
+}
+
+// TestBuildArgsWGC 钉住 WGC 的输入段:rawvideo + nv12 + 源尺寸 + 命名管道。
+func TestBuildArgsWGC(t *testing.T) {
+	const target = "rtsp://127.0.0.1:8554/live"
+	nvenc := Encoder{Name: "h264_nvenc", Kind: "nvenc", Hardware: true}
+	v := config.VideoConfig{Source: config.SourceScreenWGC, FPS: 60, BitrateKbps: 4000}
+	video := &VideoInput{
+		URL:      `\.\pipe\sharescreen-wgc-test`,
+		Width:    1920,
+		Height:   1200,
+		FPS:      60,
+		PixelFmt: "nv12",
+	}
+
+	t.Run("输入段必须是 rawvideo/nv12/源尺寸/管道", func(t *testing.T) {
+		args, err := BuildArgs(v, CaptureOpts{DrawMouse: true}, nil, video, nvenc, target, 0, 0)
+		if err != nil {
+			t.Fatalf("BuildArgs 报错:%v", err)
+		}
+		joined := strings.Join(args, " ")
+		want := `-f rawvideo -pix_fmt nv12 -video_size 1920x1200 -framerate 60 -i \.\pipe\sharescreen-wgc-test`
+		if !strings.Contains(joined, want) {
+			t.Errorf("输入段不对:\n%s\n想要包含:\n%s", joined, want)
+		}
+		if got := valuesOf(args, "-map"); len(got) != 1 || got[0] != "0:v:0" {
+			t.Errorf("-map = %v,想要 [0:v:0]", got)
+		}
+		if indexOf(args, "-vf") >= 0 {
+			t.Errorf("源尺寸=目标尺寸时不该缩放:%v", args)
+		}
+	})
+
+	t.Run("带音频时视频 0、音频 1", func(t *testing.T) {
+		audio := &AudioInput{
+			URL: "tcp://127.0.0.1:34567", SampleFmt: "f32le",
+			SampleRate: 48000, Channels: 2, BitrateKbps: 96,
+		}
+		args, err := BuildArgs(v, CaptureOpts{DrawMouse: true}, audio, video, nvenc, target, 0, 0)
+		if err != nil {
+			t.Fatalf("BuildArgs 报错:%v", err)
+		}
+		got := valuesOf(args, "-map")
+		if len(got) != 2 || got[0] != "0:v:0" || got[1] != "1:a:0" {
+			t.Errorf("-map = %v,想要 [0:v:0 1:a:0]", got)
+		}
+	})
+
+	t.Run("缩放用配置尺寸,源尺寸仍来自采集进程", func(t *testing.T) {
+		scaled := v
+		scaled.Width, scaled.Height = 1280, 800
+		args, err := BuildArgs(scaled, CaptureOpts{DrawMouse: true}, nil, video, nvenc, target, 0, 0)
+		if err != nil {
+			t.Fatalf("BuildArgs 报错:%v", err)
+		}
+		if got := valueOf(t, args, "-vf"); got != "scale=1280:800" {
+			t.Errorf("-vf = %q,想要 scale=1280:800", got)
+		}
+	})
+
+	t.Run("缺少视频输入参数要报错", func(t *testing.T) {
+		if _, err := BuildArgs(v, CaptureOpts{DrawMouse: true}, nil, nil, nvenc, target, 0, 0); err == nil {
+			t.Error("WGC 源缺少 VideoInput 时应当报错")
+		}
+	})
 }

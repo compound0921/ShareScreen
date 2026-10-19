@@ -1,0 +1,24 @@
+[package]
+name = "wgc-capture"
+version = "0.1.0"
+edition = "2024"
+description = "Windows Graphics Capture helper for ShareScreen"
+license = "MIT"
+
+[dependencies]
+# 采集层。锁定版本:探针就是在 2.0.1 上验证的。
+windows-capture = "=2.0.1"
+# 命名管道只需要少量 Win32 调用。
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+panic = "abort"

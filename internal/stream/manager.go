@@ -8,10 +8,15 @@ package stream
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sharescreen/internal/audio"
@@ -38,6 +43,9 @@ const (
 	// 32 毫秒),干等那 1.5 秒是纯浪费 —— 而回退会连着试好几个候选,
 	// 这个等待会一次次叠加。
 	healthPoll = 50 * time.Millisecond
+	// WGC 采集进程从启动到报告 ready 的上限。实测首帧 + D3D 初始化
+	// 在 1 秒内完成;8 秒是给慢机器留的余量。
+	wgcReadyTimeout = 8 * time.Second
 	// 启动失败后的重试次数与退避基数。这是**同一个编码器**的重试次数;
 	// 换下一个编码器是另一层(见 runStart)。
 	startRetries = 2
@@ -84,8 +92,9 @@ type Manager struct {
 	// stMu 保护下面的状态字段,只短暂持有,保证 Status() 随时可读。
 	stMu sync.RWMutex
 
-	tool *paths.Tool
-	job  *proc.Job
+	tool    *paths.Tool
+	wgcTool *paths.Tool // nil 表示没有构建/安装 WGC 采集模块;选中 WGC 源时再报错
+	job     *proc.Job
 
 	cfg      config.Config
 	encoders []ffmpeg.Encoder
@@ -104,6 +113,7 @@ type Manager struct {
 
 	state           State
 	child           *proc.Child
+	wgcChild        *proc.Child // 仅 screen_wgc 时非 nil
 	startedAt       time.Time
 	lastErr         string
 	lastCommand     string
@@ -126,15 +136,16 @@ type Manager struct {
 	lastWarning string
 }
 
-func New(tool *paths.Tool) (*Manager, error) {
+func New(tool *paths.Tool, wgcTool *paths.Tool) (*Manager, error) {
 	job, err := proc.NewJob()
 	if err != nil {
 		return nil, err
 	}
 	m := &Manager{
-		tool:  tool,
-		job:   job,
-		state: StateStopped,
+		tool:    tool,
+		wgcTool: wgcTool,
+		job:     job,
+		state:   StateStopped,
 	}
 	return m, nil
 }
@@ -191,6 +202,14 @@ func (m *Manager) Status() Status {
 	if m.child != nil {
 		st.Running = m.child.Running()
 		st.OutputTail = m.child.Tail(12)
+	}
+	if m.wgcChild != nil {
+		for _, line := range m.wgcChild.Tail(12) {
+			st.OutputTail = append(st.OutputTail, "wgc: "+line)
+		}
+		if !m.wgcChild.Running() {
+			st.Running = false
+		}
 	}
 	if st.State == StateRunning && !m.startedAt.IsZero() {
 		st.UptimeMs = time.Since(m.startedAt).Milliseconds()
@@ -438,8 +457,21 @@ func (m *Manager) startOnce(enc ffmpeg.Encoder) error {
 		opts.DDAGrabVendor != gpu.VendorUnknown && !m.vendorUsable(opts.DDAGrabVendor) {
 		opts.DDAGrabVendor = gpu.VendorUnknown
 	}
-	args, err := ffmpeg.BuildArgs(cfg.Video, opts, audioIn, enc, target, screenW, screenH)
+	// WGC 的视频来自外部采集进程,必须在 BuildArgs 之前启动并拿到
+	// 管道地址与真实分辨率。
+	var video *ffmpeg.VideoInput
+	if cfg.Video.Source == config.SourceScreenWGC {
+		vi, err := m.startWGC(cfg.Video.FPS, opts.DrawMouse)
+		if err != nil {
+			m.stopAudio()
+			return err
+		}
+		video = &vi
+	}
+
+	args, err := ffmpeg.BuildArgs(cfg.Video, opts, audioIn, video, enc, target, screenW, screenH)
 	if err != nil {
+		m.stopWGC()
 		m.stopAudio()
 		return err
 	}
@@ -452,7 +484,8 @@ func (m *Manager) startOnce(enc ffmpeg.Encoder) error {
 		Stdin: true, // 需要 stdin 才能发 'q' 优雅退出
 	})
 	if err != nil {
-		// 启动失败会走重试,别把音频设备句柄漏在那儿。
+		// 启动失败会走重试,别把音频设备和采集进程漏在那儿。
+		m.stopWGC()
 		m.stopAudio()
 		return err
 	}
@@ -463,6 +496,155 @@ func (m *Manager) startOnce(enc ffmpeg.Encoder) error {
 	m.lastCommand = ffmpeg.Describe(m.tool.Exe, args)
 	m.stMu.Unlock()
 	return nil
+}
+
+// wgcPipeName 生成一个进程内唯一的命名管道名。
+//
+// 带 pid、纳秒时间戳和自增序号:上一次进程崩溃留下的同名管道不会把这次
+// 启动挡住(采集进程用的是 FILE_FLAG_FIRST_PIPE_INSTANCE)。
+var wgcPipeSeq atomic.Uint64
+
+func wgcPipeName() string {
+	return fmt.Sprintf(`\\.\pipe\sharescreen-wgc-%d-%d-%d`,
+		os.Getpid(), time.Now().UnixNano(), wgcPipeSeq.Add(1))
+}
+
+// startWGC 启动 WGC 采集进程并等它报告 ready。
+//
+// 返回的 VideoInput 已经填好管道地址和真实分辨率,交给 BuildArgs 构造
+// rawvideo 输入。drawMouse 直接对应远控光标门控。
+func (m *Manager) startWGC(fps int, drawMouse bool) (ffmpeg.VideoInput, error) {
+	if m.wgcTool == nil {
+		return ffmpeg.VideoInput{}, errors.New(
+			"WGC 采集模块不可用:未找到 tools/wgc-capture.exe")
+	}
+	if fps <= 0 {
+		fps = 60
+	}
+	pipeName := wgcPipeName()
+	lines := make(chan string, 8)
+	cursor := "0"
+	if drawMouse {
+		cursor = "1"
+	}
+
+	child, err := proc.Start(m.job, proc.Spec{
+		Name: "wgc-capture",
+		Exe:  m.wgcTool.Exe,
+		Dir:  m.wgcTool.Dir,
+		Args: []string{
+			"--pipe", pipeName,
+			"--fps", strconv.Itoa(fps),
+			"--cursor", cursor,
+		},
+		Stdin: true, // 停止时发 'q'/EOF,采集进程据此收尾
+		OnLine: func(line string) {
+			select {
+			case lines <- line:
+			default: // 回调不能阻塞,丢掉多余状态行
+			}
+		},
+	})
+	if err != nil {
+		return ffmpeg.VideoInput{}, err
+	}
+
+	m.stMu.Lock()
+	m.wgcChild = child
+	m.stMu.Unlock()
+
+	video, err := m.waitWGCReady(child, lines, fps)
+	if err != nil {
+		m.stopWGC()
+		return ffmpeg.VideoInput{}, err
+	}
+	video.URL = pipeName
+	video.PixelFmt = "nv12"
+	return video, nil
+}
+
+// waitWGCReady 等采集进程输出 readiness JSON。
+func (m *Manager) waitWGCReady(child *proc.Child, lines <-chan string, fps int) (ffmpeg.VideoInput, error) {
+	deadline := time.NewTimer(wgcReadyTimeout)
+	tick := time.NewTicker(healthPoll)
+	defer deadline.Stop()
+	defer tick.Stop()
+
+	for {
+		select {
+		case line := <-lines:
+			video, matched, err := parseWGCReady(line, fps)
+			if err != nil {
+				return ffmpeg.VideoInput{}, err
+			}
+			if matched {
+				return video, nil
+			}
+		case <-deadline.C:
+			return ffmpeg.VideoInput{}, fmt.Errorf(
+				"WGC 采集模块 %s 内未就绪\n%s", wgcReadyTimeout, child.TailText(15))
+		case <-tick.C:
+			if !child.Running() {
+				return ffmpeg.VideoInput{}, fmt.Errorf(
+					"WGC 采集模块提前退出: %v\n%s", child.ExitErr(), child.TailText(15))
+			}
+		}
+	}
+}
+
+// parseWGCReady 解析采集进程的一行输出。
+//
+// 第二项表示这行是不是 ready 事件:不是 ready(采集进程的其他日志)
+// 就返回 false,调用方继续等;第三项只对"是 ready 但内容非法"报错。
+func parseWGCReady(line string, wantFPS int) (ffmpeg.VideoInput, bool, error) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "{") {
+		return ffmpeg.VideoInput{}, false, nil
+	}
+
+	var msg struct {
+		Event  string `json:"event"`
+		Width  int    `json:"width"`
+		Height int    `json:"height"`
+		FPS    int    `json:"fps"`
+	}
+	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		return ffmpeg.VideoInput{}, false, nil
+	}
+	if msg.Event != "ready" {
+		return ffmpeg.VideoInput{}, false, nil
+	}
+	if msg.Width <= 0 || msg.Height <= 0 {
+		return ffmpeg.VideoInput{}, true, fmt.Errorf(
+			"WGC ready 行的尺寸无效: %dx%d", msg.Width, msg.Height)
+	}
+	if msg.Width%2 != 0 || msg.Height%2 != 0 {
+		return ffmpeg.VideoInput{}, true, fmt.Errorf(
+			"WGC 分辨率必须是偶数(NV12): %dx%d", msg.Width, msg.Height)
+	}
+	if wantFPS > 0 && msg.FPS != wantFPS {
+		return ffmpeg.VideoInput{}, true, fmt.Errorf(
+			"WGC 帧率不一致: 采集 %d,期望 %d", msg.FPS, wantFPS)
+	}
+	return ffmpeg.VideoInput{
+		Width:    msg.Width,
+		Height:   msg.Height,
+		FPS:      msg.FPS,
+		PixelFmt: "nv12",
+	}, true, nil
+}
+
+// stopWGC 停止采集进程。可重复调用。
+func (m *Manager) stopWGC() {
+	m.stMu.RLock()
+	child := m.wgcChild
+	m.stMu.RUnlock()
+	if child != nil {
+		_ = child.Stop(stopGrace)
+	}
+	m.stMu.Lock()
+	m.wgcChild = nil
+	m.stMu.Unlock()
 }
 
 // healthCheck 等一小段时间,确认 ffmpeg 没有立刻退出。
@@ -480,10 +662,14 @@ func (m *Manager) healthCheck() error {
 	for {
 		m.stMu.RLock()
 		child := m.child
+		wgc := m.wgcChild
 		m.stMu.RUnlock()
 
 		if child == nil {
 			return fmt.Errorf("内部错误:健康检查时没有子进程")
+		}
+		if wgc != nil && !wgc.Running() {
+			return fmt.Errorf("WGC 采集进程提前退出: %v\n%s", wgc.ExitErr(), wgc.TailText(15))
 		}
 		if !child.Running() {
 			tail := child.TailText(15)
@@ -514,6 +700,10 @@ func (m *Manager) ensureClean() {
 	if child != nil {
 		_ = child.Stop(stopGrace)
 	}
+
+	// 再停采集进程:ffmpeg 先松开管道读端,采集进程的 WriteFile 会立刻
+	// 返回 broken pipe;反过来会让它白等一个 stopGrace。
+	m.stopWGC()
 
 	// 先停 ffmpeg 再停音频:反过来的话 ffmpeg 的输入会先断,它可能
 	// 以非零码退出,污染 stderr 里那点有用的信息。

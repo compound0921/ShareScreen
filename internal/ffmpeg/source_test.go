@@ -1,6 +1,10 @@
 package ffmpeg
 
-import "testing"
+import (
+	"testing"
+
+	"sharescreen/internal/config"
+)
 
 // TestDDAGrabFailureHint 钉住"哪些采集层错误值得翻译成人话"。
 //
@@ -44,5 +48,28 @@ func TestDDAGrabFailureHint(t *testing.T) {
 				t.Errorf("DDAGrabFailureHint(%q) = %q,想要非空=%v", tc.tail, got, tc.want)
 			}
 		})
+	}
+}
+
+// WGC 的采集范围和远控支持:第一阶段只采主显示器,和 ddagrab 一样。
+func TestWGCSourceHelpers(t *testing.T) {
+	v := config.VideoConfig{Source: config.SourceScreenWGC}
+
+	if !SupportsRemote(v) {
+		t.Error("WGC 整屏采集应当支持远程控制")
+	}
+	if got := ViewerRotation(v, 180); got != 0 {
+		t.Errorf("WGC 走 DWM 合成,ViewerRotation = %d,想要 0", got)
+	}
+
+	r, ok := CaptureRect(v)
+	if !ok {
+		t.Skip("本机拿不到桌面尺寸")
+	}
+	if r.X != 0 || r.Y != 0 {
+		t.Errorf("WGC 只采主屏,原点应当是 (0,0),得到 (%d,%d)", r.X, r.Y)
+	}
+	if r.W <= 0 || r.H <= 0 {
+		t.Errorf("WGC 采集矩形尺寸无效: %dx%d", r.W, r.H)
 	}
 }

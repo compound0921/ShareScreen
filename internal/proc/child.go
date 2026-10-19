@@ -26,15 +26,22 @@ type Spec struct {
 	Dir   string // 工作目录
 	Args  []string
 	Stdin bool // 是否开 stdin 管道(ffmpeg 需要,用于发 'q' 优雅退出)
+
+	// OnLine 可选:在 stdout 每读到一行时调用(同样会进 tail)。
+	//
+	// 只给 stdout,不给 stderr —— 调用方要的是"子进程主动报告的状态行",
+	// 而 stderr 是排错输出。回调跑在 drain goroutine 上,**不能阻塞**:
+	// 阻塞会把子进程的 stdout 缓冲区填满,反过来卡死子进程。
+	OnLine func(string)
 }
 
 // Child 是一个受管子进程。
 type Child struct {
 	spec Spec
 
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	tail   *RingBuffer
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	tail      *RingBuffer
 	assignErr error // job 绑定失败时记录,不致命但会失去孤儿清理兜底
 
 	waitOnce sync.Once
@@ -91,8 +98,8 @@ func Start(job *Job, spec Spec) (*Child, error) {
 	}
 
 	// 必须有人消费输出,否则管道填满会把子进程卡死
-	go c.drain(stdout)
-	go c.drain(stderr)
+	go c.drain(stdout, spec.OnLine)
+	go c.drain(stderr, nil)
 
 	go func() {
 		c.waitErr = cmd.Wait()
@@ -102,15 +109,19 @@ func Start(job *Job, spec Spec) (*Child, error) {
 	return c, nil
 }
 
-func (c *Child) drain(r io.Reader) {
+func (c *Child) drain(r io.Reader, onLine func(string)) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	// ffmpeg 的进度统计用 \r 刷新同一行,所以 \r 和 \n 都要当分隔符
 	sc.Split(splitOnNewline)
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), " \t")
-		if line != "" {
-			c.tail.Add(line)
+		if line == "" {
+			continue
+		}
+		c.tail.Add(line)
+		if onLine != nil {
+			onLine(line)
 		}
 	}
 }

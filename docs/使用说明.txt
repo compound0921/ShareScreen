@@ -1,4 +1,4 @@
-ShareScreen —— Windows 屏幕共享
+﻿ShareScreen —— Windows 屏幕共享
 ==============================
 
 怎么用
@@ -6,6 +6,11 @@ ShareScreen —— Windows 屏幕共享
 1. 双击 ShareScreen.exe。浏览器会自动打开控制页,任务栏托盘出现一个图标。
 2. 在控制页里选好采集源、分辨率和帧率,点「开始共享」。
 3. 把控制页上「观看地址」里的链接发给别人,浏览器打开就能看,对方不用装东西。
+
+采集源怎么选:
+  ·「屏幕(推荐,兼容性最好)」:任何机器都能用。
+  ·「屏幕(GPU 采集,更快)」:CPU 占用低;个别机器会提示打不开。
+  ·「屏幕(WGC 采集)」:GPU 采集打不开时选它;只采主显示器。
 
 程序没有窗口,运行期间靠托盘图标操作:双击打开控制页,右键可以开始/停止共享、
 退出。
@@ -91,8 +96,9 @@ ShareScreen —— Windows 屏幕共享
   ShareScreen.exe                  程序本体
   tools\ffmpeg\bin\ffmpeg.exe      采集和编码
   tools\mediamtx\mediamtx.exe      WebRTC 分发
+  tools\wgc-capture.exe            WGC 采集(可选,只采主显示器)
 
-这三样要放在一起,别只把 ShareScreen.exe 单独拷走 —— 找不到 tools\ 时程序会
+这些要放在一起,别只把 ShareScreen.exe 单独拷走 —— 找不到 tools\ 时程序会
 启动失败,并在对话框里告诉你缺哪个。组件也可以自己换,按同样的路径放进去就行
 (比如想换一个 ffmpeg 版本)。
 

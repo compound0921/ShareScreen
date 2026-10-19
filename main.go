@@ -109,6 +109,14 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 		return err
 	}
 
+	// WGC 采集模块是可选的:没有它,其余采集源照常工作。只在用户真的
+	// 选了「屏幕(WGC)」时才需要它,所以这里不把它当成启动失败。
+	wgcTool, wgcErr := paths.ResolveWGCCapture()
+	if wgcErr != nil {
+		log.Printf("警告: WGC 采集模块不可用(选中「屏幕(WGC)」时会失败): %v", wgcErr)
+		wgcTool = nil
+	}
+
 	// ── 探测本机能力 ──
 	//
 	// 分两步:先问 ffmpeg 构建里有哪些编码器(快,但那只说明编译进去了),
@@ -182,7 +190,21 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 			opts.DDAGrabVendor != gpu.VendorUnknown && !ffmpeg.DDAGrabVendorUsable(ffmpegTool.Exe, opts.DDAGrabVendor) {
 			opts.DDAGrabVendor = gpu.VendorUnknown
 		}
-		args, err := ffmpeg.BuildArgs(cfg.Video, opts, audioIn, enc, target, desktopW, desktopH)
+
+		// WGC 的管道名和真实分辨率由采集进程运行期给出,这里只能用占位值
+		// 保证打印出来的命令形状正确。
+		var video *ffmpeg.VideoInput
+		if cfg.Video.Source == config.SourceScreenWGC {
+			log.Printf("WGC:管道名与实际分辨率由采集进程运行期给出,下面用占位值")
+			video = &ffmpeg.VideoInput{
+				URL:      `\\.\pipe\sharescreen-wgc-<运行期分配>`,
+				Width:    desktopW,
+				Height:   desktopH,
+				FPS:      cfg.Video.FPS,
+				PixelFmt: "nv12",
+			}
+		}
+		args, err := ffmpeg.BuildArgs(cfg.Video, opts, audioIn, video, enc, target, desktopW, desktopH)
 		if err != nil {
 			return err
 		}
@@ -237,7 +259,7 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	log.Printf("MediaMTX 已启动")
 
 	// ── 推流管理器 ──
-	manager, err := stream.New(ffmpegTool)
+	manager, err := stream.New(ffmpegTool, wgcTool)
 	if err != nil {
 		return err
 	}

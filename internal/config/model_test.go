@@ -199,3 +199,21 @@ func TestMappedPortFollowsListening(t *testing.T) {
 		})
 	}
 }
+
+// WGC 是新增的采集源:Normalize 不能把它当成未知值回退掉,默认源也不能
+// 因此改变 —— 第一阶段它是手动选项。
+func TestWGCSourceSurvivesNormalize(t *testing.T) {
+	if !ValidSource(SourceScreenWGC) {
+		t.Fatal("SourceScreenWGC 应当是合法采集源")
+	}
+
+	cfg := Config{Video: VideoConfig{Source: SourceScreenWGC}}
+	cfg.Normalize()
+	if cfg.Video.Source != SourceScreenWGC {
+		t.Errorf("Normalize 把 WGC 源改成了 %q", cfg.Video.Source)
+	}
+
+	if got := Default().Video.Source; got != SourceScreenGDI {
+		t.Errorf("默认采集源 = %q,想要 %q", got, SourceScreenGDI)
+	}
+}
