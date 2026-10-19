@@ -60,15 +60,23 @@ type Server struct {
 	mtx      *mediamtx.Client
 	encoders []ffmpeg.Encoder
 	presets  []config.Resolution
-	lanIP    string
 	cfgPath  string
 	onTopo   func(config.Config) error
 	portMap  PortMapper
 	remote   RemoteController
 
+	// addrMu 保护 lanIP/lanIPs —— 页面刷新时会重新扫描网卡,
+	// 而轮询请求可能同时在读。
+	addrMu sync.RWMutex
+	lanIP  string
+
 	// lanIPs 是探测到的局域网候选,第一条是"自动"会选的那个。
 	// 只用来填下拉,不参与任何判断。
 	lanIPs []AddressCandidate
+
+	// refreshLAN 重新扫描网卡,返回新的自动地址和候选。
+	// 探测网卡的代码在 package main;这里只拿回调,避免 server 依赖它。
+	refreshLAN func() (string, []AddressCandidate)
 
 	// pubIP 为 nil 表示不做外部探测(测试里就是这个)。
 	pubIP PublicIPProbe
@@ -103,6 +111,9 @@ type Options struct {
 	// LANIPs 是探测到的局域网候选,第一条是"自动"会选的那个。
 	// 来自 main 里的网卡扫描,只用来填控制页的下拉。
 	LANIPs []AddressCandidate
+
+	// RefreshLAN 重新扫描网卡。nil 表示不刷新(测试或不支持的环境)。
+	RefreshLAN func() (string, []AddressCandidate)
 
 	// PublicIP 为 nil 表示不做公网地址的外部探测 ——
 	// 那是个可选增强,没有它一切照常,只是下拉里少一个候选。
@@ -140,6 +151,7 @@ func New(o Options) *Server {
 		presets:       o.Presets,
 		lanIP:         o.LANIP,
 		lanIPs:        o.LANIPs,
+		refreshLAN:    o.RefreshLAN,
 		pubIP:         o.PublicIP,
 		cfgPath:       o.ConfigPath,
 		cfg:           o.Config,

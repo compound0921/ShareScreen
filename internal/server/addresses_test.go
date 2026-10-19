@@ -203,3 +203,33 @@ type panicProbe struct{}
 func (panicProbe) Lookup(context.Context) (publicip.Result, error) {
 	panic("路由器已经有地址了,不该调用外部探测")
 }
+
+// 刷新页面要重新扫描网卡:新的自动地址要同时反映到下拉、链接和端口映射。
+func TestRefreshAddressesUpdatesLANAndPortMap(t *testing.T) {
+	pm := &recordingPortMap{}
+	s := &Server{
+		lanIP:   "192.168.3.236",
+		lanIPs:  []AddressCandidate{{Host: "192.168.3.236"}},
+		portMap: pm,
+		cfg:     config.Config{WebRTCPort: 8889, UDPPort: 8189},
+		refreshLAN: func() (string, []AddressCandidate) {
+			return "10.0.0.9", []AddressCandidate{
+				{Host: "10.0.0.9"},
+				{Host: "192.168.3.236"},
+			}
+		},
+	}
+
+	s.refreshAddresses()
+	resp := s.buildAddresses()
+
+	if resp.LanAuto != "10.0.0.9" {
+		t.Errorf("LanAuto = %q,想要刷新后的 10.0.0.9", resp.LanAuto)
+	}
+	if len(resp.LAN) != 2 || resp.LAN[0].Host != "10.0.0.9" {
+		t.Errorf("LAN 候选 = %+v,想要刷新后的两个地址", resp.LAN)
+	}
+	if pm.internal != "10.0.0.9" {
+		t.Errorf("端口映射目标 = %q,想要刷新后的 10.0.0.9", pm.internal)
+	}
+}

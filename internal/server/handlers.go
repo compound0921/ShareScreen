@@ -81,6 +81,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// 页面刷新时重新扫描地址。只有首屏带这个参数,2 秒轮询不会反复探测
+	// (公网探测还要走外部服务)。
+	if r.URL.Query().Get("refresh") == "1" {
+		s.refreshAddresses()
+	}
 	cfg := s.currentConfig()
 
 	encoders := s.encoders

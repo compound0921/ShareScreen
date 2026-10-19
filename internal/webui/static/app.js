@@ -995,7 +995,8 @@ function renderPortMap(snap) {
 async function init() {
   let state;
   try {
-    state = await api('/api/state');
+    // 首屏带 refresh=1:刷新页面时重新扫描网卡和公网地址。
+    state = await api('/api/state?refresh=1');
   } catch (err) {
     document.body.insertAdjacentHTML('afterbegin',
       `<p style="padding:16px;color:#dc2626">无法连接到本地服务:${err.message}</p>`);

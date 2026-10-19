@@ -79,6 +79,8 @@ func (s *Server) linkHost(cfg config.Config) string {
 	if cfg.LanHost != "" {
 		return cfg.LanHost
 	}
+	s.addrMu.RLock()
+	defer s.addrMu.RUnlock()
 	return s.lanIP
 }
 
@@ -99,7 +101,11 @@ func (s *Server) routerExternalIP() string {
 func (s *Server) buildAddresses() *addressesResponse {
 	// LAN 直接透传探测结果,顺序就是 main 里定好的(网卡扫描序)。
 	// 「自动会选哪个」另走 LanAuto —— 两者通常不是同一个。
-	resp := &addressesResponse{LAN: s.lanIPs, LanAuto: s.lanIP}
+	s.addrMu.RLock()
+	lan := append([]AddressCandidate(nil), s.lanIPs...)
+	auto := s.lanIP
+	s.addrMu.RUnlock()
+	resp := &addressesResponse{LAN: lan, LanAuto: auto}
 
 	resp.RouterIP = s.routerExternalIP()
 
@@ -108,6 +114,29 @@ func (s *Server) buildAddresses() *addressesResponse {
 	s.echoMu.RUnlock()
 
 	return resp
+}
+
+// refreshAddresses 重新扫描局域网地址,并触发一次公网地址探测。
+//
+// 页面刷新时调用:网卡、VPN、路由器的公网地址都可能在这期间变了。
+// 局域网扫描是同步的;公网探测可能要走外部服务,放后台做,下一次 2 秒
+// 轮询就能看到结果,不拖慢首屏。
+func (s *Server) refreshAddresses() {
+	if s.refreshLAN != nil {
+		ip, cands := s.refreshLAN()
+		s.addrMu.Lock()
+		changed := s.lanIP != ip
+		s.lanIP, s.lanIPs = ip, cands
+		s.addrMu.Unlock()
+
+		// 拿到地址才更新端口映射;网卡暂时不可用时不把映射目标清空。
+		if changed && ip != "" && s.portMap != nil {
+			s.syncPortMapRules(s.currentConfig())
+		}
+	}
+	if s.pubIP != nil {
+		go s.refreshEcho(context.Background())
+	}
 }
 
 func (s *Server) setEcho(ip, source string) {

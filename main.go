@@ -422,13 +422,17 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	defer stop()
 
 	srv := server.New(server.Options{
-		Stream:           manager,
-		Runner:           runner,
-		MTX:              mediamtx.NewClient(cfg.APIPort),
-		Encoders:         encoders,
-		Presets:          presets,
-		LANIP:            ip,
-		LANIPs:           lanCandidates(),
+		Stream:   manager,
+		Runner:   runner,
+		MTX:      mediamtx.NewClient(cfg.APIPort),
+		Encoders: encoders,
+		Presets:  presets,
+		LANIP:    ip,
+		LANIPs:   lanCandidates(),
+		// 页面刷新时重新扫描网卡;探测代码在 package main。
+		RefreshLAN: func() (string, []server.AddressCandidate) {
+			return lanIP(), lanCandidates()
+		},
 		PublicIP:         publicIPProbe(),
 		ConfigPath:       cfgPath,
 		Config:           cfg,

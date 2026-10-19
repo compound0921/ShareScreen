@@ -359,9 +359,13 @@ func (s *Server) syncPortMapRules(cfg config.Config) {
 	// 这是"事实"和"偏好"的区别:映射指向哪台主机由路由表决定,选错一块网卡
 	// 会让路由器收到一个不属于它局域网的内网地址,直接回 402 Invalid Args
 	// (实测踩过)。LanHost 只影响链接里显示什么,见 linkHost。
+	s.addrMu.RLock()
+	internalIP := s.lanIP
+	s.addrMu.RUnlock()
+
 	s.portMap.Configure(
 		portmap.RulesForWithControl(cfg.WebRTCPort, cfg.UDPPort, cfg.RemoteControl.MappedPort()),
-		s.lanIP)
+		internalIP)
 }
 
 // rcAction 是 approve / deny 共用的请求解析。
