@@ -167,6 +167,18 @@ go run ./cmd/portmapcheck -map     # 试建一次映射,试完删除
 | MediaMTX | [GitHub Releases](https://github.com/bluenviron/mediamtx/releases) | `tools/mediamtx/mediamtx.exe` |
 | wgc-capture | 本项目 `wgc-capture/` | `tools/wgc-capture.exe` |
 
+ffmpeg 压缩包里还带 `ffplay`、`ffprobe` 和 `doc/`,本程序只用 `ffmpeg.exe`,
+其余可以删掉。
+
+体积优化(可选):用 UPX 压缩 ffmpeg 和 MediaMTX,约 101 MB → 27 MB、
+54 MB → 23 MB:
+
+```bash
+upx --best --lzma tools/ffmpeg/bin/ffmpeg.exe tools/mediamtx/mediamtx.exe
+```
+
+UPX 只影响装载,不影响硬件编码和推流;个别杀毒软件可能对加壳程序误报。
+
 ```bash
 cargo build --release --manifest-path wgc-capture/Cargo.toml
 cp wgc-capture/target/release/wgc-capture.exe tools/wgc-capture.exe

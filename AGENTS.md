@@ -85,6 +85,11 @@ Windows 10 1809+、Go 1.27+、`GOOS=windows`。
 | `-config <路径>` | 换配置文件,默认 `%LOCALAPPDATA%\ShareScreen\config.json` |
 
 > 只有源码构建才需要 Rust;发布包里已经带着构建好的 `tools/wgc-capture.exe`。
+>
+> `tools/ffmpeg/bin/ffmpeg.exe` 和 `tools/mediamtx/mediamtx.exe` 已用 UPX 压缩
+> (101 → 27 MB、54 → 23 MB)。换官方二进制后要重跑
+> `upx --best --lzma tools/ffmpeg/bin/ffmpeg.exe tools/mediamtx/mediamtx.exe`,
+> 否则发布包会回到 70 MB。UPX 不影响硬件编码,但可能触发个别杀软误报。
 
 **没有 CI、没有 Makefile、没有 golangci 配置,别假设它们存在。** 这个仓库的"检查"就是
 `go build ./...` + `go vet ./...` + `go test ./...`,加上真机手测(见 §6)。
