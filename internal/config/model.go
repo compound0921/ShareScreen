@@ -15,14 +15,15 @@ const (
 	// 而且依赖驱动和显卡,个别机器上抓不到画面。
 	SourceScreenDDAGrab SourceType = "screen_ddagrab"
 	// 屏幕,走 Windows.Graphics.Capture(WGC),由 tools/wgc-capture.exe 采集,
-	// 经命名管道把 NV12 原始帧交给 ffmpeg。
+	// 经命名管道把 NV12 原始帧交给 ffmpeg。**默认源**。
 	//
-	// 只支持**主显示器**。存在的理由:ddagrab 依赖"DDA 输出必须归属于当前
-	// 适配器",在部分混合显卡机器上这个拓扑本身就是错的(见架构设计 §5.1);
+	// 只支持**主显示器**。选它作默认的理由:ddagrab 依赖"DDA 输出必须归属于
+	// 当前适配器",在部分混合显卡机器上这个拓扑本身就是错的(见架构设计 §5.1);
 	// WGC 走 DWM 合成层,不依赖该前提,已在真机上验证能抓到画面。
+	// 需要 Windows 10 1903+(CreateForMonitor);更老的系统请改选兼容模式。
 	SourceScreenWGC SourceType = "screen_wgc"
-	// 屏幕,走 gdigrab。**默认源** —— 性能不如 ddagrab,但它对硬件没有要求,
-	// 任何一台 Windows 上都能出画面。默认值要的是"一定能用",不是"最快"。
+	// 屏幕,走 gdigrab。兼容模式 —— 性能不如 ddagrab,但任何 Windows 上都能
+	// 出画面;WGC 不可用(系统太老、缺少采集模块)时用它兜底。
 	SourceScreenGDI SourceType = "screen_gdigrab"
 	// 单个窗口 —— 只能用 gdigrab,ddagrab 不支持。
 	SourceWindow SourceType = "window"
@@ -238,11 +239,14 @@ type Config struct {
 
 // Default 返回默认配置。
 //
-// 默认采集源是 gdigrab 而不是更快的 ddagrab:ddagrab 依赖 DXGI Desktop
-// Duplication,在部分显卡/驱动/远程桌面会话下会直接抓不到画面 —— 而默认值
-// 一旦抓不到画面,用户看到的是"这个程序坏了",不是"我该换个采集源"。
-// 宁可默认慢一点,也要保证任何机器上点开始就有画面;要性能的自己去选
-// 「屏幕(GPU 采集)」。
+// 默认采集源是 WGC:它走 DWM 合成层,不依赖 DXGI 输出归属,ddagrab 完全
+// 打不开的混合显卡机器也能出画面;发布包自带 tools/wgc-capture.exe。
+// 需要 Windows 10 1903+;更老的系统、或源码构建没装 WGC 模块时,用
+// 「屏幕(兼容模式)」。
+//
+// 不选更快的 ddagrab 作默认:它依赖 DXGI Desktop Duplication,在部分
+// 显卡/驱动/远程桌面会话下会直接抓不到画面 —— 默认值一旦抓不到画面,
+// 用户看到的是"这个程序坏了",不是"我该换个采集源"。
 //
 // 默认不缩放(Width/Height 为 0)。这是实测结论:原生分辨率既避开了 2 倍
 // 放大的模糊,又省掉了缩放本身的开销(ddagrab 下还意味着不用 hwdownload,
@@ -252,7 +256,7 @@ func Default() Config {
 	o := mediamtx.DefaultOptions()
 	return Config{
 		Video: VideoConfig{
-			Source:      SourceScreenGDI,
+			Source:      SourceScreenWGC,
 			Width:       0,
 			Height:      0,
 			FPS:         60,

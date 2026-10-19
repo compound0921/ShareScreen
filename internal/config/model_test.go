@@ -213,7 +213,7 @@ func TestWGCSourceSurvivesNormalize(t *testing.T) {
 		t.Errorf("Normalize 把 WGC 源改成了 %q", cfg.Video.Source)
 	}
 
-	if got := Default().Video.Source; got != SourceScreenGDI {
-		t.Errorf("默认采集源 = %q,想要 %q", got, SourceScreenGDI)
+	if got := Default().Video.Source; got != SourceScreenWGC {
+		t.Errorf("默认采集源 = %q,想要 %q", got, SourceScreenWGC)
 	}
 }

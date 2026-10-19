@@ -113,8 +113,14 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	// 选了「屏幕(WGC)」时才需要它,所以这里不把它当成启动失败。
 	wgcTool, wgcErr := paths.ResolveWGCCapture()
 	if wgcErr != nil {
-		log.Printf("警告: WGC 采集模块不可用(选中「屏幕(WGC)」时会失败): %v", wgcErr)
+		log.Printf("警告: WGC 采集模块不可用: %v", wgcErr)
 		wgcTool = nil
+	}
+	// WGC 现在是默认源。模块缺失时不能让它成为"默认值起不来"——
+	// 本次运行退回兼容模式,把原因写进日志。
+	if wgcTool == nil && cfg.Video.Source == config.SourceScreenWGC {
+		log.Printf("WGC 采集模块缺失,本次改用兼容模式")
+		cfg.Video.Source = config.SourceScreenGDI
 	}
 
 	// ── 探测本机能力 ──
