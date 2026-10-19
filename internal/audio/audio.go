@@ -53,3 +53,26 @@ func (f Format) String() string {
 	return f.SampleFmt + " " + strconv.Itoa(f.SampleRate) + "Hz " +
 		strconv.Itoa(f.Channels) + "声道"
 }
+
+// silencePadBytes 返回这一轮该补写的静音字节数,0 表示还不够一次补齐。
+//
+// 返回值必须向下取整到**完整采样帧**(BlockAlign)。PCM 是逐帧切分的,
+// 静音补齐只要写进半个采样,后面所有真实数据就会整体错位 —— ffmpeg 按
+// float 解释错位的字节,拿到一半是 NaN/巨大值。症状极具迷惑性:采集侧
+// 数据完全正常、ffmpeg 也照常产出音频轨,但观众听到的是静音或噪声。
+//
+// 实测:补齐量按字节算时几乎从不落在 BlockAlign 边界上;把落盘字节按
+// +1 偏移重新解释,f32 RMS 立刻从乱码的 0.10 变回正常信号的 0.0701。
+func silencePadBytes(want, produced, frameBytes, stepBytes int64) int64 {
+	if frameBytes <= 0 {
+		return 0
+	}
+	gap := want - produced
+	if gap > 0 {
+		gap -= gap % frameBytes
+	}
+	if gap < stepBytes {
+		return 0
+	}
+	return gap
+}

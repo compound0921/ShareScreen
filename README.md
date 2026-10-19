@@ -154,9 +154,9 @@ go build -ldflags "-H=windowsgui -s -w" -o sharescreen.exe .
 打发布包:
 
 ```bash
-go run ./cmd/genrelease -version 1.7
+go run ./cmd/genrelease -version 1.7.1
 ```
 
-产出 `dist/ShareScreen-1.7.zip`(约 53 MB),包含 `ShareScreen.exe`、
+产出 `dist/ShareScreen-1.7.1.zip`(约 53 MB),包含 `ShareScreen.exe`、
 `使用说明.txt` 和 `tools/` 下的三个组件。整个 zip 发给对方,解压后双击即可;
 目标机器不需要装 Go 或 Rust。
