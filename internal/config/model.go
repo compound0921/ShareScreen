@@ -51,6 +51,14 @@ func ValidSource(s SourceType) bool {
 	return false
 }
 
+// ValidFPS 报告 fps 是否是界面提供的档位。
+//
+// 只保留 30 和 60:120 对采集/编码余量要求高(DDA 的原始交付上限约 66fps),
+// 15/20 在屏幕共享里基本没人用,只会让下拉框变长。
+func ValidFPS(fps int) bool {
+	return fps == 30 || fps == 60
+}
+
 // External 报告该采集源是否由外部程序推流。
 //
 // 为真时本程序不启动 ffmpeg —— MediaMTX 直接接收 OBS 推过来的流。
@@ -313,7 +321,7 @@ func (c *Config) Normalize() {
 	if !ValidSource(c.Video.Source) {
 		c.Video.Source = d.Video.Source
 	}
-	if c.Video.FPS <= 0 || c.Video.FPS > 240 {
+	if !ValidFPS(c.Video.FPS) {
 		c.Video.FPS = d.Video.FPS
 	}
 	if c.Video.BitrateKbps <= 0 {

@@ -217,3 +217,21 @@ func TestWGCSourceSurvivesNormalize(t *testing.T) {
 		t.Errorf("默认采集源 = %q,想要 %q", got, SourceScreenWGC)
 	}
 }
+
+// 帧率只保留 30 和 60;旧配置里的 120/20/15 在 Normalize 时回到默认 60。
+func TestNormalizeFPS(t *testing.T) {
+	for _, fps := range []int{0, -1, 15, 20, 24, 120, 144, 240} {
+		cfg := Config{Video: VideoConfig{FPS: fps}}
+		cfg.Normalize()
+		if got := cfg.Video.FPS; got != 60 {
+			t.Errorf("FPS=%d 归一化后 = %d,想要 60", fps, got)
+		}
+	}
+	for _, fps := range []int{30, 60} {
+		cfg := Config{Video: VideoConfig{FPS: fps}}
+		cfg.Normalize()
+		if got := cfg.Video.FPS; got != fps {
+			t.Errorf("FPS=%d 不该被改,得到 %d", fps, got)
+		}
+	}
+}
