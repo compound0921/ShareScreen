@@ -192,32 +192,46 @@ func needsScaling(v config.VideoConfig, srcW, srcH int) bool {
 
 // isZeroCopy 报告该采集源能否让硬件帧直达编码器。
 //
-// 只有 ddagrab 且不需要缩放时才可以。ddagrab 输出的 d3d11 帧一旦经过
-// hwdownload 就变成普通内存帧,零拷贝路径即告结束。
-func isZeroCopy(v config.VideoConfig, srcW, srcH int) bool {
-	return v.Source == config.SourceScreenDDAGrab && !needsScaling(v, srcW, srcH)
+// 三个条件缺一不可:ddagrab、不需要缩放、编码器是 NVENC。
+//
+// 编码器这一条是后补的,而且是 T2 的根因:ddagrab 输出的是 d3d11 硬件帧,
+// 只有 NVENC 能直接吃。qsv / amf / libx264 都需要先 hwdownload 回内存。
+// 原来的判据只看采集源和缩放,于是"GPU 采集 + 非 NVIDIA 显卡"这条路上
+// 会生成一条没有任何滤镜的命令,ffmpeg 直接报
+//
+//	Impossible to convert between the formats supported by the filter
+//
+// 然后所有候选编码器按同样的方式重来一遍,全部失败 —— 表现就是
+// "GPU 采集在别的机器上永远用不了"。实测:同一台机器上 ddagrab +
+// libx264 报上面那条错,补上 hwdownload,format=bgra 后正常出帧。
+func isZeroCopy(v config.VideoConfig, enc Encoder, srcW, srcH int) bool {
+	return v.Source == config.SourceScreenDDAGrab && enc.Kind == "nvenc" && !needsScaling(v, srcW, srcH)
 }
 
-// filterArgs 返回缩放相关的滤镜参数。
+// filterArgs 返回缩放/下载相关的滤镜参数。
 //
 // 这里有三个实测踩出来的坑:
 //
-//  1. ddagrab 不缩放时必须**完全不产生滤镜链**,才能保持零拷贝。
-//  2. ddagrab 要缩放时,唯一可行的写法是 hwdownload 回到内存再缩放。
+//  1. ddagrab 零拷贝时必须**完全不产生滤镜链**,才能保持零拷贝。
+//  2. ddagrab 不走零拷贝时(要缩放,或编码器不是 NVENC),唯一可行的
+//     写法是 hwdownload 回到内存;要缩放就再接 scale。
 //     GPU 侧缩放的两条路都走不通:scale_d3d11 报 "Unsupported pixel format",
 //     hwmap=derive_device=cuda + scale_cuda 报 "Function not implemented"。
 //     代价是每个全屏帧多一次 CPU 拷贝(2K 分辨率下约 16 MB/帧)。
 //  3. 非 ddagrab 的源本来就是内存帧,普通 scale 即可。
-func filterArgs(v config.VideoConfig, srcW, srcH int) []string {
+func filterArgs(v config.VideoConfig, enc Encoder, srcW, srcH int) []string {
+	if v.Source == config.SourceScreenDDAGrab && !isZeroCopy(v, enc, srcW, srcH) {
+		f := "hwdownload,format=bgra"
+		if needsScaling(v, srcW, srcH) {
+			f += fmt.Sprintf(",scale=%d:%d", v.Width, v.Height)
+		}
+		return []string{"-vf", f}
+	}
+
 	if !needsScaling(v, srcW, srcH) {
 		return nil
 	}
-	scale := fmt.Sprintf("scale=%d:%d", v.Width, v.Height)
-
-	if v.Source == config.SourceScreenDDAGrab {
-		return []string{"-vf", "hwdownload,format=bgra," + scale}
-	}
-	return []string{"-vf", scale}
+	return []string{"-vf", fmt.Sprintf("scale=%d:%d", v.Width, v.Height)}
 }
 
 // pixFmtArgs 返回像素格式参数。
@@ -225,9 +239,9 @@ func filterArgs(v config.VideoConfig, srcW, srcH int) []string {
 // ddagrab 零拷贝路径下必须**不传** -pix_fmt:强行指定 yuv420p 会让 ffmpeg
 // 在 d3d11 硬件帧和软件格式之间插入一次不可能的转换,直接报
 // "Impossible to convert between the formats supported by the filter"。
-// 这种情况下 NVENC 内部会自行处理格式。
-func pixFmtArgs(v config.VideoConfig, srcW, srcH int) []string {
-	if isZeroCopy(v, srcW, srcH) {
+// 这种情况下 NVENC 内部会自行处理格式。其余路径都是内存帧,照常指定。
+func pixFmtArgs(v config.VideoConfig, enc Encoder, srcW, srcH int) []string {
+	if isZeroCopy(v, enc, srcW, srcH) {
 		return nil
 	}
 	return []string{"-pix_fmt", "yuv420p"}

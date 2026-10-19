@@ -69,7 +69,7 @@ func BuildArgs(v config.VideoConfig, o CaptureOpts, audio *AudioInput, enc Encod
 	// 音频流不受影响 —— 实测带音频时这一项不会报错也不会告警。
 	args = append(args, "-fps_mode", "cfr")
 
-	args = append(args, filterArgs(v, srcW, srcH)...)
+	args = append(args, filterArgs(v, enc, srcW, srcH)...)
 	args = append(args, encoderArgs(enc, v)...)
 	args = append(args, audioArgs(audio)...)
 
@@ -80,7 +80,7 @@ func BuildArgs(v config.VideoConfig, o CaptureOpts, audio *AudioInput, enc Encod
 	// 注意:永远不要加 -multipass —— 实测它与 -tune ll 冲突,直接报错。
 	args = append(args, "-bf", "0")
 
-	args = append(args, pixFmtArgs(v, srcW, srcH)...)
+	args = append(args, pixFmtArgs(v, enc, srcW, srcH)...)
 
 	// 输出走 RTSP 而不是 RTMP:只有 RTSP 能原样携带 Opus,而 Opus 是
 	// 浏览器 WebRTC 唯一支持的音频编码。RTMP 只能带 AAC,MediaMTX 又

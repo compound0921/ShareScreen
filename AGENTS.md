@@ -274,3 +274,45 @@ ICE 媒体 **8189/udp**、RTMP 推流入口 **1935**、SRT 推流入口 **8890**
   `git config --global --add safe.directory D:/GitNotUploaded/ShareScreen`。
 - 用 PowerShell 时不要把原生命令的输出接进管道(`go build ... | Select-Object` 会被沙箱
   判定为命名管道并拒绝),直接跑、看退出码。
+
+---
+
+## 10. 待修复问题(真机测试反馈)
+
+以下问题已在真机上复现。动相关代码前先复现一次,修完按 §6 手测,
+并把实测结论写回 `docs/架构设计.md`。每条末尾的「状态」说明当前进度。
+
+### T1 兼容模式采集时,拖动窗口和系统动画掉帧
+
+- **采集方式:** 兼容模式,即 `SourceScreenGDI`(`-f gdigrab`)。
+- **现象:** 静止画面正常;连续拖动窗口、最小化/最大化动画、开始菜单/任务视图等
+  系统动画时明显掉帧、卡顿。
+- **落点:** `internal/ffmpeg/source.go`(gdigrab 输入参数)、`internal/ffmpeg/args.go`
+  (`-fps_mode cfr`、编码器/码率)。
+- **已知前提:** gdigrab 走 GDI BitBlt,抓的是原始 BMP,CPU 拷贝极重,性能本就比
+  ddagrab 差一个数量级(架构设计 §5.4)。
+- **验证方向(未确认):** 用 ffmpeg 输出里的 `drop=` 区分掉帧在采集侧还是编码/推流侧;
+  确认 GDI 重绘与 `-framerate` 轮询的关系,是否需要 `-thread_queue_size`;对比
+  libx264 与硬件编码在同一场景下是否都是同样程度的掉帧。
+- **验收:** 兼容模式拖动窗口、播放系统动画时,观看端不再有肉眼可见的持续掉帧;
+  受硬件所限无法完全消除的部分要明确记下边界。
+
+### T2 GPU 采集在其他设备上总是无法使用
+
+- **采集方式:** GPU 采集,即 `SourceScreenDDAGrab`(`ddagrab=framerate=N`)。
+- **现象:** 在**另外三台设备**上实测,选择 GPU 采集后均无法共享,没有一台成功出画面。
+- **根因(2026-10-19 已复现):** ddagrab 输出的是 d3d11 硬件帧,只有 NVENC 能直接
+  吃;而原来的零拷贝判据只看"采集源 + 是否缩放",**不看编码器**。目标分辨率等于
+  桌面分辨率时,非 NVENC 的机器会得到一条没有任何滤镜的命令,ffmpeg 直接报
+  `Impossible to convert between the formats supported by the filter`,然后每个
+  候选编码器都按同样方式失败。实测 `ddagrab + libx264` 必然复现。
+- **修复:** `isZeroCopy` 增加"编码器必须是 `nvenc`"这一条;其余情况在
+  `filterArgs` 里补 `hwdownload,format=bgra`(要缩放再接 `scale`),见
+  `internal/ffmpeg/source.go`、`args.go`。回归用例在
+  `internal/ffmpeg/args_test.go` 的 `TestFilterArgsZeroCopy`。
+- **剩余风险:** 三台设备的具体型号/驱动未知。如果仍有失败,先收集显卡型号、系统版本、
+  是否混合显卡,以及 ffmpeg 输出尾部 —— 那说明问题出在 ddagrab 本身(驱动/远程桌面
+  会话),不是编码器。这种情况应按"自动回退兼容模式 + 明确提示"处理,不能静默失败。
+- **验收:** GPU 采集至少能在一台非 NVIDIA 设备上正常共享;确实不支持的机器
+  有明确提示并自动回退。
+- **状态:** 代码已修复,单测与 ffmpeg 实跑已通过;**等待三台设备的真机复测**。
