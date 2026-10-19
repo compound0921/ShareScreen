@@ -449,7 +449,7 @@ func (m *Manager) startOnce(enc ffmpeg.Encoder) error {
 	// 远控开着时不画主机光标,见 ffmpeg.CaptureOptsFor。
 	opts := ffmpeg.CaptureOptsFor(cfg.Video, cfg.RemoteControl.Enabled)
 	// GPU 采集显式绑定显示器所在的适配器,而不是听凭 ddagrab 用 0 号。
-	// 混合显卡机器上 0 号常常是不接显示器的独显,见架构设计 §5.1。
+	// 混合显卡机器上 0 号常常是不接显示器的独显。
 	opts.DDAGrabVendor = prefVendor
 	// DXGI 里没有这块卡时,vendor_id 会让 ffmpeg 在参数解析阶段直接失败。
 	// 退回不绑定的旧路径,至少保持原来的行为。

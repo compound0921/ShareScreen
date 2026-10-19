@@ -31,7 +31,7 @@ const (
 // 数组元素是 UTF-16,按 2 字节对齐,而 StateFlags 落在偏移 324(4 的倍数),
 // 所以中间没有填充。但"应该没有"不作数 —— 用编译期断言钉死,对不上直接
 // 编不过。同一个教训在 WAVEFORMATEX 和 INPUT 上各踩过一次
-// (docs/架构设计.md §5.5、internal/input/input_windows.go)。
+// (见 internal/input/input_windows.go)。
 type displayDeviceW struct {
 	cb           uint32
 	DeviceName   [32]uint16

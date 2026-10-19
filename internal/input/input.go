@@ -10,7 +10,7 @@
 //     ElevatedForeground。
 //   - **安全桌面上的注入必然失效**:Ctrl+Alt+Del、UAC 同意框、锁屏。
 //     这是 Windows 的设计,不是缺陷,也不该试图绕过。
-//   - **不能有 cgo**(见 docs/架构设计.md §5.5),只能用
+//   - **不能有 cgo**,只能用
 //     golang.org/x/sys/windows 的纯 Go 调用。
 //
 // # 坐标是怎么算的

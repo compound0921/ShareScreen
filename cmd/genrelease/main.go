@@ -36,7 +36,7 @@ import (
 const (
 	appName = "ShareScreen"
 	outDir  = "dist"
-	// 去掉控制台窗口和符号表。和 README 里写的一致。
+	// 去掉控制台窗口和符号表。
 	ldflags = "-H=windowsgui -s -w"
 
 	// userReadme 是随包发出去的那份说明在仓库里的位置。到了包里它躺在
@@ -79,7 +79,7 @@ func run(version string) error {
 		if _, err := os.Stat(p.src); err != nil {
 			return fmt.Errorf("缺少发布内容 %s\n"+
 				"发布包要把这些一起带上,所以它们必须先存在 —— "+
-				"见 README 的「准备」一节", p.src)
+				"请先把它们放到 tools/ 下", p.src)
 		}
 	}
 	if _, err := os.Stat(userReadme); err != nil {

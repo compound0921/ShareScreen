@@ -26,8 +26,8 @@
 //
 // 还有控制密码这条捷径,它两层都免掉第二层。见 config 里那段。
 //
-// 之所以要两层:视频流本身是不鉴权的(链接即凭据,见架构文档 §7.5 的
-// 取舍),所以"能看"这件事挡不住。让陌生人只能看、不能动,靠的是第二层。
+// 之所以要两层:视频流本身是不鉴权的(链接即凭据),所以"能看"这件事
+// 挡不住。让陌生人只能看、不能动,靠的是第二层。
 package remotectl
 
 import (
@@ -896,9 +896,8 @@ func (s *Server) handler() http.Handler {
 	// 静态资源无条件提供。页面本身没有任何秘密 —— 令牌在 URL 的 #
 	// 片段里,由页面脚本自己取,不会发到服务器。
 	//
-	// 这和视频链路是同一个取舍:观看本来就不鉴权(链接即凭据,
-	// 见架构文档 §7.5)。真正的门槛在 WebSocket 那一侧的令牌,
-	// 以及主机的当场批准。
+	// 这和视频链路是同一个取舍:观看本来就不鉴权(链接即凭据)。真正的
+	// 门槛在 WebSocket 那一侧的令牌,以及主机的当场批准。
 	static, _ := fs.Sub(webui.Files, "static")
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(static))))
 	mux.HandleFunc("/", s.handlePage)

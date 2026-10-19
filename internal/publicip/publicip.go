@@ -27,7 +27,7 @@ const (
 	// requestTimeout 是单次请求的上限。
 	//
 	// 必须显式设:零值 http.Client 等于永不超时,而这是唯一一个会把我们
-	// 挂在外部服务上的地方(同类教训见 §7.6 里 goupnp 那条)。
+	// 挂在外部服务上的地方。
 	requestTimeout = 3 * time.Second
 
 	// maxBody 是响应体的读取上限。回显服务只该回一行 IP,1KB 足够 ——

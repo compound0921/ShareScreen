@@ -468,9 +468,8 @@ func (m *Mapper) sync(st *runState) time.Duration {
 		s.Message = fmt.Sprintf("自动映射已生效 · 外网地址 %s · 已开端口 %s",
 			HostPort(externalIP, rules[0].ExternalPort), portList(rules))
 		// 成功时不留 Hint:这一行只是"映射开好了"的状态,不是问题。
-		// 防火墙要放行哪些端口、怎么验证公网可达,写在 README 的
-		// 「让公网也能看」一节里 —— 界面上的每一句解释都在稀释那几行
-		// 真正要看的数字。
+		// 防火墙要放行哪些端口、怎么验证公网可达,不在这一行展开 ——
+		// 界面上的每一句解释都在稀释那几行真正要看的数字。
 		//
 		// 失败路径照样给 Hint(见 manualHint):那里说的是"那你现在怎么办",
 		// 和这里的性质不一样。
@@ -589,11 +588,10 @@ func (m *Mapper) fail(st *runState, message string) time.Duration {
 func manualHint(message string, rules []Rule) string {
 	if containsAny(message, "运营商级 NAT", "内网地址", "IPv6") {
 		return "这台机器的上网出口拿不到公网地址,自动映射帮不上忙。" +
-			"需要改用 VPS 中转或内网穿透,见 README 的「让公网也能看」一节。"
+			"需要改用 VPS 中转或内网穿透。"
 	}
 	return fmt.Sprintf(
-		"请在路由器后台手动添加 %d 条端口映射:%s,内外端口一致。"+
-			"详见 README 的「让公网也能看」一节。",
+		"请在路由器后台手动添加 %d 条端口映射:%s,内外端口一致。",
 		len(rules), portList(rules))
 }
 

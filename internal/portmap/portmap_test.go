@@ -670,7 +670,7 @@ func TestManualHintMentionsRemoteControlPort(t *testing.T) {
 // 成功路径不留 Hint。
 //
 // 以前这里挂着一句"自动映射成功不等于一定可达,请放行防火墙…",界面上被
-// 去掉了(那一行是状态,不是问题;要放行哪些端口写在 README 里)。
+// 去掉了(那一行是状态,不是问题)。
 // 这条测试就是钉住这件事:失败路径该给建议,成功路径不该。
 func TestActiveHasNoHint(t *testing.T) {
 	svc := newFake("203.0.113.7")

@@ -165,7 +165,7 @@ func encoderArgs(enc Encoder, v config.VideoConfig) []string {
 	var head []string
 	switch enc.Kind {
 	case "nvenc":
-		// p7 是最高质量的预设。硬件编码器的余量非常大(实测见架构设计 §5.4),
+		// p7 是最高质量的预设。硬件编码器的余量非常大,
 		// 选最慢的预设不吃亏。
 		head = []string{"-c:v", "h264_nvenc", "-preset", "p7", "-tune", "ll", "-rc", "cbr"}
 	case "qsv":

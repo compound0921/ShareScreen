@@ -24,7 +24,6 @@ type CaptureOpts struct {
 	// 默认 true —— 观看时能看见对方的光标是有用的。远程控制开启时必须
 	// 关掉,否则控制者看到的唯一指针是 0.3–1 秒前的那一个,操作起来像
 	// 在拖东西。关掉之后指针改由控制端自己画(浏览器原生光标,零延迟)。
-	// 见 docs/架构设计.md §12.11。
 	DrawMouse bool
 
 	// DDAGrabVendor 是驱动主显示器那块显卡的厂商。非 Unknown 时,GPU 采集
@@ -34,7 +33,6 @@ type CaptureOpts struct {
 	// 这是实测踩出来的:混合显卡笔记本上 DXGI 适配器 0 常常是不接显示器的
 	// NVIDIA,显示器在 Intel 上;ddagrab 默认用 0,DuplicateOutput 直接返回
 	// DXGI_ERROR_UNSUPPORTED(ffmpeg 报 "Selected output not supported")。
-	// 见 docs/架构设计.md §5.1。
 	DDAGrabVendor gpu.Vendor
 }
 
@@ -85,7 +83,7 @@ type inputSpec struct {
 
 	// graph 非空表示视频源来自 -filter_complex,值形如
 	// "ddagrab=framerate=60[v]"。给 ddagrab 指定适配器时必须走这条:
-	// -filter_hw_device 对 lavfi 的 -i 输入无效(实测,见架构设计 §5.1)。
+	// -filter_hw_device 对 lavfi 的 -i 输入无效(实测)。
 	graph string
 }
 
@@ -379,7 +377,7 @@ func pixFmtArgs(v config.VideoConfig, enc Encoder, srcW, srcH int) []string {
 //
 // 原始报错只说"输出不支持",用户不知道该换采集方式还是该动驱动,所以
 // 这里把下一步写清楚。不自动回退采集源:配置、界面和远控坐标都按当前
-// 采集源算,静默换源会让三者对不上(取舍见 AGENTS.md §10 的 T2)。
+// 采集源算,静默换源会让三者对不上。
 func DDAGrabFailureHint(tail string) string {
 	switch {
 	case strings.Contains(tail, "Selected output not supported"):

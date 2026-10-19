@@ -84,7 +84,7 @@ func main() {
 	}
 	if len(usable) == 0 {
 		fmt.Println("\n没有一台报告可用的公网地址 —— 自动映射即使建上也访问不到。")
-		fmt.Println("这种情况只能走 VPS 中转或内网穿透,见 docs/公网架构设计.md。")
+		fmt.Println("这种情况只能走 VPS 中转或内网穿透。")
 		os.Exit(1)
 	}
 
@@ -122,7 +122,7 @@ func main() {
 	fmt.Println()
 	if !allOK {
 		fmt.Println("结论:有映射没能建立 —— 程序里的自动映射在这台路由器上不会生效,")
-		fmt.Println("      请按 README 手动配置。")
+		fmt.Println("      请在路由器后台手动配置端口映射。")
 		os.Exit(1)
 	}
 	if *keep {

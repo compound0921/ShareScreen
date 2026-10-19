@@ -135,7 +135,7 @@ func (s *Server) effectiveStatus(cfg config.Config) stream.Status {
 //
 // 只给 WHIP。以前还列过一个 RTMP 地址作为兜底,去掉了:它**只有画面没有
 // 声音** —— RTMP 只能带 AAC,而浏览器的 WebRTC 只认 Opus,MediaMTX 又不
-// 转码(实测,见架构设计 §5.5)。一条注定没声音的地址摆在"推荐"下面,
+// 转码(实测)。一条注定没声音的地址摆在"推荐"下面,
 // 用户选了它然后来问为什么没声音,这个来回不值得。
 //
 // MediaMTX 那边的 RTMP 监听还开着(本机回环,不映射到公网),所以真要

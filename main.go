@@ -143,7 +143,7 @@ func run(cfgPath string, printArgs, noBrowser, noTray bool) error {
 	// 显示器挂在哪块显卡上 —— 决定编码器优先选谁。
 	//
 	// ddagrab 抓的是驱动显示器那块 GPU 的画面,编码若落在另一块卡上,
-	// 帧要跨 PCIe 走一趟(架构设计 §5.4)。识不出来就是"未知",排序退回
+	// 帧要跨 PCIe 走一趟。识不出来就是"未知",排序退回
 	// 原本的优先级,不影响启动。
 	adapterVendor := gpu.PrimaryVendor()
 	if list := gpu.Adapters(); len(list) > 0 {
