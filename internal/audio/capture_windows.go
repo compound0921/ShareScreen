@@ -671,9 +671,28 @@ func (c *Capture) Run(ctx context.Context, w io.Writer) error {
 		idleSleep = 5 * time.Millisecond
 	)
 
-	bytesPerSec := float64(c.format.SampleRate * c.format.BlockAlign)
-	stepBytes := int64(float64(silenceStep) / float64(time.Second) * bytesPerSec)
-	maxBytes := int64(float64(silenceMax) / float64(time.Second) * bytesPerSec)
+	// 所有补齐量都必须落在**完整采样帧**的边界上。
+	//
+	// 这是实测踩出来的:原来直接按字节数算,补齐量几乎从来不是 BlockAlign
+	// 的整数倍。一旦写进半个采样,后面所有真实 PCM 都会整体错位 —— ffmpeg
+	// 按 f32 解释这些字节,拿到一半是 NaN/巨大值。症状极具迷惑性:采集侧
+	// 数据完全正常(RMS 与设备输出一致)、ffmpeg 也照常产出 Opus 轨道,
+	// 但观众那边听到的是静音/噪声。实测把落盘字节按 +1 偏移重新解释,
+	// RMS 立刻从 0.10 的乱码变回 0.0701 的正常信号。
+	//
+	// 字节数一律用整数算,别让浮点误差再引入零头。
+	frameBytes := int64(c.format.BlockAlign)
+	bytesPerSec := int64(c.format.SampleRate) * frameBytes
+	stepBytes := bytesPerSec * int64(silenceStep) / int64(time.Second)
+	stepBytes -= stepBytes % frameBytes
+	maxBytes := bytesPerSec * int64(silenceMax) / int64(time.Second)
+	maxBytes -= maxBytes % frameBytes
+	if stepBytes <= 0 {
+		stepBytes = frameBytes
+	}
+	if maxBytes < frameBytes {
+		maxBytes = frameBytes
+	}
 	silence := make([]byte, maxBytes)
 
 	start := time.Now()
@@ -690,9 +709,9 @@ func (c *Capture) Run(ctx context.Context, w io.Writer) error {
 	// 补的是"已经过去、但还没输出"的那段时间。真实数据一到位,产出量立刻
 	// 追上墙上时钟,缺口自然归零 —— 所以有声音时不会重复补。
 	padSilence := func() error {
-		want := int64(time.Since(start).Seconds() * bytesPerSec)
-		gap := want - produced
-		if gap < stepBytes {
+		want := int64(time.Since(start).Seconds() * float64(bytesPerSec))
+		gap := silencePadBytes(want, produced, frameBytes, stepBytes)
+		if gap == 0 {
 			return nil
 		}
 		if gap > maxBytes {
